@@ -52,12 +52,12 @@ pip install -e ".[all]"
 This is the most common use case inside a Jupyter notebook after you have performed clustering.
 
 ```python
-import anndata
+import scanpy as sc
 from scfeatureprofiler import find_marker_features
 
 # 1. Load your clustered single-cell data
 #    (This example assumes you have an AnnData object)
-adata = anndata.read_h5ad("path/to/your_clustered_data.h5ad")
+adata = sc.read_h5ad("path/to/your_clustered_data.h5ad")
 
 # 2. Find marker features for your clusters
 #    'leiden' is the column in adata.obs containing cluster labels.

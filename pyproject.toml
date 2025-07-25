@@ -4,15 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scfeatureprofiler"
-version = "0.1.0"
-description = "A powerful, multi-interface Python package for deep characterization of gene expression patterns from single-cell data"
+
+version = "1.0.0"
+
+description = "A powerful, multi-interface Python package for deep characterization of single-cell feature expression patterns."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "SingleCellFeatureProfiler Team"}
+    {name = "Qingzhou Zhang"}
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -23,16 +26,21 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 requires-python = ">=3.9"
+
+
 dependencies = [
     "numpy>=1.20.0",
     "pandas>=1.3.0",
     "scipy>=1.7.0",
-    "anndata>=0.8.0",
     "statsmodels>=0.13.0",
-    "scanpy>=1.10.0",
+    "joblib>=1.2.0",
+    "typer>=0.9.0",
 ]
 
 [project.optional-dependencies]
+anndata = [
+    "anndata>=0.8.0",
+]
 dev = [
     "black>=22.0.0",
     "ruff>=0.1.0",
@@ -46,13 +54,21 @@ docs = [
     "numpydoc>=1.5.0",
 ]
 
+all = [
+    "scfeatureprofiler[anndata]",
+    "scfeatureprofiler[dev]",
+    "scfeatureprofiler[docs]",
+]
+
+
+
 [project.scripts]
-scfp_gene = "scfeatureprofiler.cli.main_profiler:main"
-scfp_find_marker = "scfeatureprofiler.cli.query_tool:main"
+scprofiler = "scfeatureprofiler.cli:app"
 
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
 
 [tool.black]
 line-length = 88

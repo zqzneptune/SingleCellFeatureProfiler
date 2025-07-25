@@ -40,7 +40,7 @@ To install all dependencies for development, use:
 # Clone the repository first
 git clone https://github.com/zqzneptune/SingleCellFeatureProfiler.git
 cd SingleCellFeatureProfiler
-pip install -e .[all]
+pip install -e ".[all]"
 ```
 
 ## Quick Start

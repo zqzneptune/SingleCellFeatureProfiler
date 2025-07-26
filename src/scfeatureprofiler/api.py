@@ -18,7 +18,6 @@ from ._engine import _run_profiling_engine
 from ._selection_hvg import select_hvg_features
 from ._selection_marker import select_marker_candidates
 
-# AnnData is an optional dependency
 try:
     from anndata import AnnData
     ANNDATA_AVAILABLE = True
@@ -30,7 +29,6 @@ def get_feature_profiles(
     data: Union[AnnData, pd.DataFrame, np.ndarray, spmatrix],
     group_by: Union[str, list, np.ndarray, pd.Series],
     features: Optional[List[str]] = None,
-    # --- REFACTORED: `select_candidates` is removed in favor of `all_features` ---
     all_features: bool = False,
     n_hvg: int = 3000,
     feature_names: Optional[List[str]] = None,
@@ -38,16 +36,13 @@ def get_feature_profiles(
     specificity_metric: str = 'tau',
     background_rate: float = 0.01,
     n_jobs: int = -1,
-    min_freq: float = 0.05,
-    max_freq: float = 0.90,
-    var_mean_ratio_min: float = 1.5,
-    gap_stat_min: float = 1.2,
-    right_tail_min: float = 2.5,
-    cv_min: Optional[float] = 0.8,
     verbose: bool = True
 ) -> pd.DataFrame:
     """
     Provides a complete statistical profile for features across all groups.
+
+    By default, if no specific feature list is provided, this function will
+    select the top N highly variable genes (HVGs) for profiling.
     """
     expression_matrix, all_f_names, group_labels, batch_labels = _prepare_and_validate_inputs(
         data=data,
@@ -56,22 +51,24 @@ def get_feature_profiles(
         batch_by=batch_by
     )
 
-    # --- REFACTORED: New, simpler logic for feature selection ---
     if features is not None:
-        # 1. User provided a specific list -> Use it
+        if verbose:
+            print(f"Profiling {len(features)} user-provided features.")
         missing = [f for f in features if f not in all_f_names]
         if missing:
             raise ValueError(f"The following features were not found in the data: {missing}")
         features_to_analyze = features
     elif all_features:
-        # 2. User explicitly asked for all features -> Use them
         if verbose:
-            print("Warning: Profiling all features. This may be slow and memory-intensive.")
+            print(f"Warning: Profiling all {len(all_f_names)} features. This may be slow and memory-intensive.")
         features_to_analyze = all_f_names
     else:
-        # 3. Default behavior -> Smart candidate selection
-        features_to_analyze = select_hvg_features(data, feature_names=feature_names, n_top_features=n_hvg, verbose=verbose)
-    # --- END REFACTOR ---
+        features_to_analyze = select_hvg_features(
+            data, 
+            feature_names=feature_names, 
+            n_top_features=n_hvg, 
+            verbose=verbose
+        )
 
     if not features_to_analyze:
         print("Warning: No features to analyze. Returning empty DataFrame.")
@@ -95,38 +92,64 @@ def get_feature_profiles(
 def find_marker_features(
     data: Union[AnnData, pd.DataFrame, np.ndarray, spmatrix],
     group_by: Union[str, list, np.ndarray, pd.Series],
-    # Post-processing filters
     specificity_threshold: float = 0.7,
     min_pct_expressing: float = 10.0,
     fdr_marker_threshold: float = 0.05,
-    # Expose pre-processing selection filters as well
     min_freq: float = 0.05,
     max_freq: float = 0.90,
     var_mean_ratio_min: float = 1.5,
     gap_stat_min: float = 1.2,
     right_tail_min: float = 2.5,
     cv_min: Optional[float] = 0.8,
+    verbose: bool = True,
     **kwargs
 ) -> Dict[str, List[str]]:
     """
     Finds significant marker features for each group in the data.
-    """
-    print("Finding marker features using a data-driven pipeline...")
-    # It does NOT call get_feature_profiles anymore. It orchestrates its own pipeline.
-    expression_matrix, all_f_names, group_labels, batch_labels = _prepare_and_validate_inputs(...)
 
-    candidate_features = select_marker_candidates(data, feature_names=all_f_names)
+    This function uses a dedicated "smart selection" pipeline to find candidate
+    markers before profiling.
+    """
+    if verbose:
+        print("Finding marker features using a data-driven marker selection pipeline...")
+
+    # Get batch_by from kwargs if present, for both validation and engine calls
+    batch_by = kwargs.get("batch_by")
+    
+    expression_matrix, all_f_names, group_labels, batch_labels = _prepare_and_validate_inputs(
+        data, group_by=group_by, batch_by=batch_by
+    )
+
+    # Use None for feature_names if data is AnnData to avoid validation error
+    candidate_features = select_marker_candidates(
+        data, 
+        feature_names=None if (ANNDATA_AVAILABLE and isinstance(data, AnnData)) else all_f_names,
+        min_freq=min_freq,
+        max_freq=max_freq,
+        var_mean_ratio_min=var_mean_ratio_min,
+        gap_stat_min=gap_stat_min,
+        right_tail_min=right_tail_min,
+        cv_min=cv_min,
+        verbose=verbose
+    )
 
     if not candidate_features:
-        print("Warning: No candidate features found after selection. Returning empty dictionary.")
+        if verbose:
+            print("Warning: No candidate features found after selection. Returning empty dictionary.")
         return {str(group): [] for group in np.unique(group_labels)}
 
+    # Run the engine on the selected candidates
     all_profiles_df = _run_profiling_engine(
-        data=data, features_to_analyze=candidate_features
+        expression_data=data if (ANNDATA_AVAILABLE and isinstance(data, AnnData)) else expression_matrix, 
+        features_to_analyze=candidate_features,
+        all_feature_names=all_f_names,
+        group_labels=group_labels,
+        batch_labels=batch_labels,
+        verbose=verbose,
+        **kwargs
     )
     
     if all_profiles_df.empty:
-        _, _, group_labels, _ = _prepare_and_validate_inputs(data, group_by)
         return {str(group): [] for group in np.unique(group_labels)}
 
     specificity_col = [c for c in all_profiles_df.columns if 'specificity' in c][0]
@@ -134,7 +157,7 @@ def find_marker_features(
         (all_profiles_df[specificity_col] >= specificity_threshold) &
         (all_profiles_df['pct_expressing'] >= min_pct_expressing) &
         (all_profiles_df['fdr_marker'] <= fdr_marker_threshold) &
-        (all_profiles_df['log2fc_marker'] > 0)
+        (all_profiles_df['log2fc_all'] > 0)
     ].copy()
     
     if potential_markers_df.empty:
@@ -153,7 +176,6 @@ def find_marker_features(
         if group_str not in marker_dict:
             marker_dict[group_str] = []
         else:
-            # Handle potential key mismatch if group is numeric
             if group_str != group:
                 marker_dict[group_str] = marker_dict.pop(group)
             marker_dict[group_str].sort()
@@ -166,12 +188,15 @@ def get_feature_activity(
     group_by: Union[str, list, np.ndarray, pd.Series],
     features: List[str],
     fdr_presence_threshold: float = 0.05,
+    verbose: bool = True,
     **kwargs
 ) -> pd.DataFrame:
     """
     For a given list of features, determines in which groups they are "ON".
     """
-    profiles_df = get_feature_profiles(data=data, group_by=group_by, features=features, **kwargs)
+    profiles_df = get_feature_profiles(
+        data=data, group_by=group_by, features=features, verbose=verbose, **kwargs
+    )
     
     if profiles_df.empty:
         return pd.DataFrame()

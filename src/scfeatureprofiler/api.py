@@ -146,7 +146,10 @@ def find_marker_features(
         group_labels=group_labels,
         batch_labels=batch_labels,
         verbose=verbose,
-        **kwargs
+        # Extract known engine parameters from kwargs, providing defaults
+        n_jobs=kwargs.get('n_jobs', -1),
+        specificity_metric=kwargs.get('specificity_metric', 'tau'),
+        background_rate=kwargs.get('background_rate', 0.01)
     )
     
     if all_profiles_df.empty:

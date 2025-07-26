@@ -87,8 +87,8 @@ If you have a CSV file of expression data and want to get a detailed statistical
 
 ```bash
 scprofiler profile \
-    --input expression.csv \
-    --group-by cell_groups.csv \
+    --input example/expression.csv \
+    --group-by example/cell_groups.csv \
     --features "CD4,CD8A,GNLY,MS4A1" \
     --output gene_profiles.csv
 ```

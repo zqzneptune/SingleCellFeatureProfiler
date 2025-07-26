@@ -90,11 +90,13 @@ def profile(
         typer.echo("No feature list provided. Using smart candidate selection by default.")
     
     results_df = get_feature_profiles(
-        data=data, group_by=group_labels, features=feature_list,
+        data=data, 
+        group_by=group_labels, 
+        features=feature_list,
         all_features=all_features,
-        batch_by=batch_labels, specificity_metric=specificity_metric, n_jobs=n_jobs,
-        min_freq=min_freq, max_freq=max_freq, var_mean_ratio_min=var_mean_ratio_min,
-        gap_stat_min=gap_stat_min, right_tail_min=right_tail_min, cv_min=cv_min,
+        batch_by=batch_labels, 
+        specificity_metric=specificity_metric, 
+        n_jobs=n_jobs,
         verbose=verbose
     )
     

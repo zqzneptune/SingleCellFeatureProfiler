@@ -18,3 +18,9 @@ def setup_logging(level=logging.INFO):
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
+
+def _log_and_print(msg: str, verbose: bool):
+    """Helper to log and optionally print a message."""
+    logger.info(msg)
+    if verbose:
+        print(msg)

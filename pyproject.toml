@@ -55,13 +55,12 @@ docs = [
 ]
 
 all = [
-    "scfeatureprofiler[anndata]",
     "scfeatureprofiler[dev]",
     "scfeatureprofiler[docs]",
 ]
 
 
-
+# Scripts section updated to the new, single Typer app entry point
 [project.scripts]
 scprofiler = "scfeatureprofiler.cli:app"
 

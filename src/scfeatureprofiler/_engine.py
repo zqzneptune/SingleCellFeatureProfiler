@@ -14,8 +14,8 @@ from joblib import Parallel, delayed, parallel_backend
 from statsmodels.stats.multitest import multipletests
 
 from ._core import _analyze_one_feature
-
-logger = logging.getLogger(__name__)
+from ._stability import _calculate_stability_scores
+from ._logging import _log_and_print
 
 try:
     from anndata import AnnData
@@ -23,27 +23,18 @@ try:
 except ImportError:
     AnnData = None
 
-def _log_and_print(msg: str, verbose: bool):
-    """Helper to log and optionally print a message."""
-    logger.info(msg)
-    if verbose:
-        print(msg)
-
-def _fdr_correct_per_group(df: pd.DataFrame, pval_col: str, fdr_col: str) -> pd.DataFrame:
-    """Applies FDR correction to p-values within each group."""
-    return df.groupby('group', observed=True)[pval_col] \
-             .transform(lambda x: multipletests(x, method='fdr_bh')[1])
+logger = logging.getLogger(__name__)
 
 
 def _worker_function(
     feature_name: str,
     feature_index: int,
-    expression_data: Union[np.ndarray, spmatrix, str], # Can be matrix or path
+    expression_data: Union[np.ndarray, spmatrix, str],
     is_backed: bool,
     **kwargs
 ) -> pd.DataFrame:
     """
-    Unified worker function for both in-memory and backed data.
+    Simplified worker function that only runs the per-condition analysis.
     """
     if is_backed:
         import anndata
@@ -67,27 +58,27 @@ def _run_profiling_engine(
     features_to_analyze: List[str],
     all_feature_names: List[str],
     group_labels: np.ndarray,
-    batch_labels: Optional[np.ndarray] = None,
+    condition_labels: Optional[np.ndarray] = None,
     specificity_metric: str = 'tau',
     background_rate: float = 0.01,
     n_jobs: int = -1,
     verbose: bool = True
 ) -> pd.DataFrame:
     """
-    Orchestrates the statistical analysis for a list of features in parallel.
+    Orchestrates analysis, builds the full per-condition table in memory,
+    then performs FDR and stability calculations.
     """
     feature_index_map = {name: i for i, name in enumerate(all_feature_names)}
     
     common_worker_kwargs = {
         'labels_vector': group_labels,
-        'batch_vector': batch_labels,
+        'condition_vector': condition_labels,
         'specificity_metric': specificity_metric,
         'background_rate': background_rate
     }
     
     is_backed = ANNDATA_AVAILABLE and isinstance(expression_data, AnnData) and expression_data.isbacked
     
-    # Unified argument preparation
     if is_backed:
         expr_data_for_worker = expression_data.filename
     elif ANNDATA_AVAILABLE and isinstance(expression_data, AnnData):
@@ -95,13 +86,12 @@ def _run_profiling_engine(
     else:
         expr_data_for_worker = expression_data
 
-    # --- Parallel Execution ---
     n_features = len(features_to_analyze)
     msg = f"Profiling {n_features} features using {n_jobs if n_jobs > 0 else 'all available'} CPU cores..."
     _log_and_print(msg, verbose)
 
     with parallel_backend('loky', n_jobs=n_jobs):
-        list_of_results = Parallel()(
+        list_of_per_condition_results = Parallel()(
             delayed(_worker_function)(
                 feature_name=feature,
                 feature_index=feature_index_map[feature],
@@ -113,29 +103,19 @@ def _run_profiling_engine(
     
     _log_and_print("Parallel computation complete. Finalizing results...", verbose)
     
-    if not list_of_results:
+    if not list_of_per_condition_results:
         return pd.DataFrame()
         
-    full_results_df = pd.concat(list_of_results, ignore_index=True)
+    # Build the full, memory-intensive per-condition table
+    per_condition_df = pd.concat(list_of_per_condition_results, ignore_index=True)
     
-    # --- Finalization and FDR Correction ---
     _log_and_print("Applying FDR correction...", verbose)
-    full_results_df['fdr_presence'] = multipletests(full_results_df['p_val_presence'], method='fdr_bh')[1]
-    full_results_df['fdr_marker'] = _fdr_correct_per_group(full_results_df, 'p_val_marker', 'fdr_marker')
     
-    full_results_df.rename(columns={'log2fc': 'log2fc_all'}, inplace=True)
+    # Perform FDR on the complete set of p-values before aggregation
+    per_condition_df['fdr_presence'] = multipletests(per_condition_df['p_val_presence'], method='fdr_bh')[1]
     
-    final_cols = [
-        'feature_id', 'group', 'norm_score', 'pct_expressing', 
-        'mean_all', 'mean_expressing', 'median_expressing',
-        'log2fc_all', 'log2fc_expressing', 'pct_expressing_lift',
-        'p_val_presence', 'fdr_presence',
-        'p_val_marker', 'fdr_marker',
-        f'specificity_{specificity_metric}'
-    ]
+    # Calculate stability and aggregate results
+    specificity_col = f'specificity_{specificity_metric}'
+    final_df = _calculate_stability_scores(per_condition_df, specificity_col)
     
-    for col in final_cols:
-        if col not in full_results_df.columns:
-            full_results_df[col] = np.nan
-            
-    return full_results_df[final_cols]
+    return final_df

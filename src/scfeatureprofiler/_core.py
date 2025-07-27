@@ -23,7 +23,7 @@ def _geometric_mean(series: pd.Series) -> float:
 
 
 def _calculate_specificity(scores: pd.Series, metric: str) -> float:
-    # ... (no changes to this function)
+    """Calculates a specificity score (Tau or Gini)."""
     if len(scores) <= 1:
         return 1.0
     if scores.max() <= 0:
@@ -44,114 +44,82 @@ def _analyze_one_feature(
     expression_vector: np.ndarray,
     labels_vector: np.ndarray,
     feature_name: str,
-    batch_vector: Optional[np.ndarray] = None,
+    condition_vector: Optional[np.ndarray] = None,
     specificity_metric: str = 'tau',
     background_rate: float = 0.01
 ) -> pd.DataFrame:
     """Performs a full statistical analysis for a single feature."""
     df = pd.DataFrame({'expression': expression_vector, 'group': labels_vector})
-    if batch_vector is not None:
-        df['batch'] = batch_vector
-
-    group_keys = ['group', 'batch'] if batch_vector is not None else ['group']
+    
+    if condition_vector is not None:
+        df['condition'] = condition_vector
+        group_keys = ['group', 'condition']
+    else:
+        group_keys = ['group']
+    
     grouped = df.groupby(group_keys, observed=True)
-
-    # --- ENHANCED: Add more aggregations ---
-    stats = grouped['expression'].agg(
+    
+    per_condition_stats = grouped['expression'].agg(
         n_cells='size',
         n_expressing=lambda x: (x > 0).sum(),
         mean_all='mean',
         mean_expressing=lambda x: x[x > 0].mean(),
-        median_expressing=lambda x: x[x > 0].median(),
-        geo_mean_in_expressing=_geometric_mean
-    ).reset_index()
-
-    stats['pct_expressing'] = (stats['n_expressing'] / stats['n_cells']) * 100
-    stats['raw_score'] = stats['pct_expressing'] * stats['geo_mean_in_expressing']
+        median_expressing=lambda x: x[x > 0].median()
+    ).reset_index().fillna(0)
     
-    # Fill NaNs that result from empty groups in agg (e.g., median_expressing of zero values)
-    stats = stats.fillna(0)
+    per_condition_stats['pct_expressing'] = (per_condition_stats['n_expressing'] / per_condition_stats['n_cells']) * 100
     
-    if batch_vector is not None:
-        # Average all numeric columns except n_cells and n_expressing
-        agg_cols = {
-            'pct_expressing': 'mean', 'raw_score': 'mean', 'mean_all': 'mean',
-            'mean_expressing': 'mean', 'median_expressing': 'mean'
-        }
-        final_stats = stats.groupby('group', observed=True).agg(agg_cols).reset_index()
-    else:
-        final_stats = stats.copy()
+    per_condition_stats['p_val_presence'] = per_condition_stats.apply(
+        lambda row: binomtest(
+            k=int(row['n_expressing']), n=int(row['n_cells']),
+            p=background_rate, alternative='greater'
+        ).pvalue,
+        axis=1
+    )
 
-    all_scores = final_stats.set_index('group')['raw_score']
-    
-    max_score, min_score = all_scores.max(), all_scores.min()
-    if max_score > min_score:
-        norm_score_series = (all_scores - min_score) / (max_score - min_score)
-    else:
-        norm_score_series = pd.Series(0.0, index=all_scores.index)
-
-    norm_scores_df = norm_score_series.reset_index(name='norm_score')
-    final_stats = pd.merge(final_stats, norm_scores_df, on='group')
-
-    specificity = _calculate_specificity(all_scores, metric=specificity_metric)
-    final_stats[f'specificity_{specificity_metric}'] = specificity
-    
-    results_list = []
+    group_level_stats = []
     unique_groups = df['group'].unique()
     
-    # Calculate overall pct_expressing outside the loop for lift calculation
-    pct_expressing_overall = (expression_vector > 0).sum() / len(expression_vector)
+    agg_pct = per_condition_stats.groupby('group')['pct_expressing'].mean().reset_index()
+    agg_pct['raw_score_proxy'] = agg_pct['pct_expressing']
+    
+    all_scores = agg_pct.set_index('group')['raw_score_proxy']
+    max_score, min_score = all_scores.max(), all_scores.min()
+    if max_score > min_score:
+        norm_scores = (all_scores - min_score) / (max_score - min_score)
+    else:
+        norm_scores = pd.Series(0.0, index=all_scores.index)
+    
+    specificity = _calculate_specificity(all_scores, metric=specificity_metric)
     
     for group in unique_groups:
-        mask_group = labels_vector == group
-        mask_other = labels_vector != group
+        mask_group = (labels_vector == group)
+        mask_other = (labels_vector != group)
+        
         expr_group = expression_vector[mask_group]
         expr_other = expression_vector[mask_other]
-        
-        # --- ENHANCED: Add more stats ---
-        mean_group_expressing = np.mean(expr_group[expr_group > 0]) if (expr_group > 0).any() else 0
-        mean_other_expressing = np.mean(expr_other[expr_other > 0]) if (expr_other > 0).any() else 0
-        log2fc_expressing = np.log2((mean_group_expressing + 1e-9) / (mean_other_expressing + 1e-9))
-        
-        pct_expressing_group = (expr_group > 0).sum() / len(expr_group)
-        pct_expressing_other = (expr_other > 0).sum() / len(expr_other) if len(expr_other) > 0 else 0
-        pct_expressing_lift = (pct_expressing_group + 1e-9) / (pct_expressing_other + 1e-9)
-        
-        n_expressing_in_group = (expr_group > 0).sum()
-        binom_res = binomtest(k=n_expressing_in_group, n=len(expr_group), p=background_rate, alternative='greater')
         
         p_val_marker = ranksums(expr_group, expr_other, alternative='greater').pvalue if len(expr_group) > 0 and len(expr_other) > 0 else 1.0
         
         mean_group_all = np.mean(expr_group)
-        mean_other_all = np.mean(expr_other)
+        mean_other_all = np.mean(expr_other) if len(expr_other) > 0 else 0
         log2fc_all = np.log2((mean_group_all + 1e-9) / (mean_other_all + 1e-9))
         
-        results_list.append({
+        group_level_stats.append({
             'group': group,
-            'p_val_presence': binom_res.pvalue,
             'p_val_marker': p_val_marker,
-            'log2fc': log2fc_all,
-            'log2fc_expressing': log2fc_expressing,
-            'pct_expressing_lift': pct_expressing_lift
+            'log2fc_all': log2fc_all,
+            'norm_score': norm_scores.get(group, 0.0),
+            f'specificity_{specificity_metric}': specificity
         })
+    
+    group_level_df = pd.DataFrame(group_level_stats)
 
-    pvals_df = pd.DataFrame(results_list)
-    final_df = pd.merge(final_stats, pvals_df, on='group')
+    final_df = pd.merge(per_condition_stats, group_level_df, on='group')
     final_df['feature_id'] = feature_name
     
-    final_df = final_df.drop(columns=['raw_score'])
+    if 'condition' not in final_df.columns:
+        final_df['condition'] = 'all'
     
-    # --- ENHANCED: Add more columns to final output ---
-    final_cols = [
-        'feature_id', 'group', 'norm_score', 'pct_expressing', 'mean_all', 'mean_expressing', 'median_expressing',
-        'log2fc', 'log2fc_expressing', 'pct_expressing_lift',
-        'p_val_presence', 'fdr_presence', # We will add FDR in the engine
-        'p_val_marker', 'fdr_marker',     # We will add FDR in the engine
-        f'specificity_{specificity_metric}'
-    ]
-    # We add placeholder columns for FDR, they will be populated in the engine
-    final_df['fdr_presence'] = -1.0
-    final_df['fdr_marker'] = -1.0
-    
-    # Return a subset and reorder
-    return final_df[[col for col in final_cols if col in final_df.columns]]
+    # Return the full per-condition table without FDR columns
+    return final_df

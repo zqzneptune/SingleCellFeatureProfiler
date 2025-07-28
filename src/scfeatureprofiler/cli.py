@@ -5,6 +5,7 @@ Command-Line Interface for SingleCellFeatureProfiler.
 """
 
 from typing import Optional
+import time
 
 import typer
 import pandas as pd
@@ -20,13 +21,10 @@ app = typer.Typer(
 )
 
 @app.callback()
-def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose progress messages for computation.")):
+def main(verbose: bool = typer.Option(True, "--verbose", "-v", help="Enable verbose progress messages for computation.")):
     """
     scProfiler: A tool for detailed single-cell feature analysis.
-    Set verbosity for all commands.
     """
-    # Note: verbose for CLI printouts is handled differently from logging setup.
-    # We set up a basic logger here.
     setup_logging(level="INFO" if verbose else "WARNING")
 
 
@@ -48,7 +46,6 @@ def _read_data(input_file: str):
 
 def _read_labels(labels_file: str) -> pd.Series:
     """Helper to read labels from a CSV file."""
-    # This helper is no longer needed by `activity`, but kept for `profile` and `find-markers`
     return pd.read_csv(labels_file, index_col=0).squeeze("columns")
 
 
@@ -58,44 +55,43 @@ def profile(
     input_file: str = typer.Option(..., "--input", "-i", help="Path to input data file (CSV or H5AD)."),
     group_by: str = typer.Option(..., "--group-by", "-g", help="Path to group labels CSV file OR column name in adata.obs."),
     output_file: str = typer.Option("feature_profiles.csv", "--output", "-o", help="Path to save the output CSV file."),
-    features: Optional[str] = typer.Option(None, "--features", "-f", help="Specific comma-separated list of features to profile."),
-    all_features: bool = typer.Option(False, "--all-features", help="Profile ALL features. Overrides HVG selection."),
-    batch_by: Optional[str] = typer.Option(None, "--batch-by", "-b", help="Path to batch labels CSV file OR column name in adata.obs."),
+    features: Optional[str] = typer.Option(None, "--features", "-f", help="Path to a plain text file with one feature per line."),
+    condition_by: Optional[str] = typer.Option(None, "--condition-by", "-c", help="Path to condition labels CSV file OR column name in adata.obs."),
     specificity_metric: str = typer.Option("tau", help="Specificity metric ('tau' or 'gini')."),
     n_jobs: int = typer.Option(-1, help="Number of parallel jobs (-1 for all)."),
 ):
     """
-    Generate a statistical profile for features.
+    Generate a detailed statistical profile for features.
 
-    By default, if no feature list is provided via --features, this command
-    will run a smart selection algorithm to find and profile promising
-    marker candidates.
-
-    To profile every single feature, use the --all-features flag.
-    Warning: This can be very slow and memory-intensive.
+    If --features is not provided, a warning will be issued and ALL
+    features in the dataset will be profiled.
     """
     verbose = ctx.parent.params.get('verbose', True)
     
-    if features and all_features:
-        typer.secho("Error: Cannot use --features and --all-features at the same time.", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-        
     typer.echo(f"Loading data from {input_file}...")
     data = _read_data(input_file)
     
-    group_labels = _read_labels(group_by) if ".csv" in group_by else group_by
-    batch_labels = _read_labels(batch_by) if batch_by and ".csv" in batch_by else batch_by
-    
-    feature_list = features.split(',') if features else None
+    if features is None:
+        typer.secho(
+            "Warning: No feature file provided. Profiling ALL features in the dataset.",
+            fg=typer.colors.YELLOW
+        )
+        typer.secho("This can be very slow and memory-intensive.", fg=typer.colors.YELLOW)
+        for i in range(5, 0, -1):
+            typer.echo(f"  Continuing in {i} seconds... (Press CTRL+C to cancel)", nl=False)
+            time.sleep(1)
+            typer.echo("\r", nl=False)
+        typer.echo("                                                          \r", nl=False)
 
-    if verbose and not features and not all_features:
-        typer.echo("No feature list provided. Using smart candidate selection by default.")
+
+    group_labels = _read_labels(group_by) if ".csv" in group_by else group_by
+    condition_labels = _read_labels(condition_by) if condition_by and ".csv" in condition_by else condition_by
     
     results_df = get_feature_profiles(
         data=data, 
         group_by=group_labels, 
-        features=feature_list,
-        batch_by=batch_labels, 
+        features=features, # Pass the file path directly to the API
+        condition_by=condition_labels, 
         specificity_metric=specificity_metric, 
         n_jobs=n_jobs,
         verbose=verbose
@@ -107,12 +103,13 @@ def profile(
         results_df.to_csv(output_file, index=False)
         typer.echo(f"✅ Success! Profiles saved to {output_file}")
 
+
 @app.command(name="find-markers")
 def find_markers_cli(
     ctx: typer.Context,
     input_file: str = typer.Option(..., "--input", "-i", help="Path to input data file (CSV or H5AD)."),
     group_by: str = typer.Option(..., "--group-by", "-g", help="Group labels source (e.g., 'leiden')."),
-    condition_by: str = typer.Option(..., "--condition-by", "-c", help="Condition labels source (e.g., 'donor', 'disease_status')."),
+    condition_by: Optional[str] = typer.Option(None, "--condition-by", "-c", help="Condition labels for stability analysis (e.g., 'donor'). Optional."),
     output_file: str = typer.Option("ranked_markers.csv", "--output", "-o", help="Path for CSV output."),
     specificity_threshold: float = typer.Option(0.7, help="[Filter] Min specificity score."),
     min_pct_expressing: float = typer.Option(10.0, help="[Filter] Min percentage of expressing cells."),
@@ -132,9 +129,8 @@ def find_markers_cli(
     typer.echo(f"Loading data from {input_file}...")
     data = _read_data(input_file)
     group_labels = _read_labels(group_by) if ".csv" in group_by else group_by
-    condition_labels = _read_labels(condition_by) if ".csv" in condition_by else condition_by
+    condition_labels = _read_labels(condition_by) if condition_by and ".csv" in condition_by else condition_by
 
-    # The function now returns a DataFrame directly
     ranked_markers_df = find_marker_features(
         data=data, 
         group_by=group_labels, 
@@ -156,7 +152,6 @@ def find_markers_cli(
         typer.echo(f"✅ Success! Ranked marker table saved to {output_file}")
 
 
-# --- REFACTORED: The `activity` command is now a post-processor ---
 @app.command()
 def activity(
     profile_file: str = typer.Argument(..., help="Path to the CSV file generated by the 'scprofiler profile' command."),
@@ -165,9 +160,6 @@ def activity(
 ):
     """
     Summarize a profile CSV to show in which groups features are active.
-
-    This is a fast post-processing utility that reads the output of
-    'scprofiler profile' and generates a simple, human-readable summary.
     """
     try:
         profiles_df = pd.read_csv(profile_file)
@@ -175,17 +167,11 @@ def activity(
         typer.secho(f"Error: Profile file not found at '{profile_file}'", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    # Check for required columns
     required_cols = ['feature_id', 'group', 'fdr_presence', 'norm_score']
     if not all(col in profiles_df.columns for col in required_cols):
-        typer.secho(
-            f"Error: The input file '{profile_file}' is missing required columns. "
-            f"Expected columns: {', '.join(required_cols)}",
-            fg=typer.colors.RED
-        )
+        typer.secho(f"Error: The input file is missing required columns: {', '.join(required_cols)}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    # Call the refactored API function
     activity_dict = get_feature_activity(
         profiles_df=profiles_df,
         fdr_presence_threshold=fdr_threshold,
@@ -196,27 +182,23 @@ def activity(
         typer.echo("No significant feature activity found with the given threshold.")
         raise typer.Exit()
 
-    # --- Format and print the human-readable output ---
     typer.echo("\n--- Feature Activity Summary ---")
     
-    # Find the longest feature name for clean alignment
-    max_len = max(len(feature) for feature in activity_dict.keys())
-    
-    # Get a sorted list of all unique features that had activity
     all_features_in_profile = profiles_df['feature_id'].unique()
+    active_features = activity_dict.keys()
+    if not active_features:
+        max_len = 0
+    else:
+        max_len = max(len(feature) for feature in active_features)
     
     for feature in all_features_in_profile:
         active_groups = activity_dict.get(feature)
-        
-        # Format the feature name part of the line
         feature_part = f"{feature}:".ljust(max_len + 2)
         
         if active_groups:
-            # Join group names (and convert to string just in case)
             groups_str = ", ".join(map(str, active_groups))
             typer.secho(f"{feature_part}{groups_str}", fg=typer.colors.GREEN)
         else:
-            # Optionally, show features that had no significant activity
             typer.secho(f"{feature_part}(No significant activity found)", fg=typer.colors.BRIGHT_BLACK)
     
     typer.echo("-" * 30)

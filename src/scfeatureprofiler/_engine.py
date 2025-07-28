@@ -16,7 +16,7 @@ from statsmodels.stats.multitest import multipletests
 from ._core import _analyze_one_feature
 from ._stability import _calculate_stability_scores
 from ._logging import _log_and_print
-
+from joblib import Parallel, delayed, parallel_backend, cpu_count
 try:
     from anndata import AnnData
     ANNDATA_AVAILABLE = True
@@ -86,12 +86,21 @@ def _run_profiling_engine(
     else:
         expr_data_for_worker = expression_data
 
+    # --- Enhanced Verbosity ---
     n_features = len(features_to_analyze)
-    msg = f"Profiling {n_features} features using {n_jobs if n_jobs > 0 else 'all available'} CPU cores..."
+    n_groups = len(np.unique(group_labels))
+    n_conditions = len(np.unique(condition_labels)) if condition_labels is not None else 1
+    # --- FIX: Accurately report the number of workers ---
+    actual_jobs = n_jobs if n_jobs > 0 else cpu_count()
+    msg = (
+        f"\n--- Profiling {n_features} features across {n_groups} groups "
+        f"and {n_conditions} condition(s) ---\n"
+        f"Using {actual_jobs} CPU cores for parallel computation..."
+    )
     _log_and_print(msg, verbose)
 
     with parallel_backend('loky', n_jobs=n_jobs):
-        list_of_per_condition_results = Parallel()(
+        list_of_per_condition_results = Parallel(verbose=0)(
             delayed(_worker_function)(
                 feature_name=feature,
                 feature_index=feature_index_map[feature],
@@ -101,21 +110,21 @@ def _run_profiling_engine(
             ) for feature in features_to_analyze
         )
     
-    _log_and_print("Parallel computation complete. Finalizing results...", verbose)
+    _log_and_print("... Parallel computation complete.", verbose)
+    _log_and_print("\n--- Finalizing results ---", verbose)
     
     if not list_of_per_condition_results:
         return pd.DataFrame()
         
-    # Build the full, memory-intensive per-condition table
     per_condition_df = pd.concat(list_of_per_condition_results, ignore_index=True)
+    _log_and_print(f"  - Collected {len(per_condition_df)} per-condition observations.", verbose)
     
-    _log_and_print("Applying FDR correction...", verbose)
-    
-    # Perform FDR on the complete set of p-values before aggregation
+    _log_and_print("  - Applying FDR correction for presence...", verbose)
     per_condition_df['fdr_presence'] = multipletests(per_condition_df['p_val_presence'], method='fdr_bh')[1]
     
-    # Calculate stability and aggregate results
+    _log_and_print("  - Aggregating results and calculating stability scores...", verbose)
     specificity_col = f'specificity_{specificity_metric}'
     final_df = _calculate_stability_scores(per_condition_df, specificity_col)
+    _log_and_print(f"  - Final aggregated table has {len(final_df)} rows.", verbose)
     
     return final_df

@@ -5,6 +5,7 @@ Public API for SingleCellFeatureProfiler.
 """
 
 from typing import List, Optional, Union, Dict
+import os
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,6 @@ from scipy.sparse import spmatrix
 
 from ._utils import _prepare_and_validate_inputs
 from ._engine import _run_profiling_engine
-from ._selection_hvg import select_hvg_features
 from ._selection_marker import select_marker_candidates
 from ._stability import _calculate_stability_scores
 
@@ -26,9 +26,9 @@ except ImportError:
 def get_feature_profiles(
     data: Union[AnnData, pd.DataFrame, np.ndarray, spmatrix],
     group_by: Union[str, list, np.ndarray, pd.Series],
-    features: Optional[List[str]] = None,
+    features: Optional[Union[List[str], str]] = None,
     feature_names: Optional[List[str]] = None,
-    batch_by: Optional[Union[str, list, np.ndarray, pd.Series]] = None,
+    condition_by: Optional[Union[str, list, np.ndarray, pd.Series]] = None,
     specificity_metric: str = 'tau',
     background_rate: float = 0.01,
     n_jobs: int = -1,
@@ -37,24 +37,40 @@ def get_feature_profiles(
     """
     Provides a complete statistical profile for features across all groups.
     """
-    expression_matrix, all_f_names, group_labels, batch_labels = _prepare_and_validate_inputs(
+    # Note: `batch_by` is now aliased to `condition_by` for internal consistency
+    expression_matrix, all_f_names, group_labels, condition_labels = _prepare_and_validate_inputs(
         data=data,
         group_by=group_by,
         feature_names=feature_names,
-        batch_by=batch_by
+        batch_by=condition_by
     )
 
+    # --- REFACTORED: New logic for feature selection ---
+    features_to_analyze = []
     if features is not None:
+        if isinstance(features, str) and os.path.exists(features):
+            # If `features` is a path to a file, read it
+            if verbose:
+                print(f"Loading features from file: {features}")
+            with open(features, 'r') as f:
+                features_to_analyze = [line.strip() for line in f if line.strip()]
+        elif isinstance(features, list):
+            # If `features` is a list
+            features_to_analyze = features
+        else:
+            raise TypeError(f"`features` must be a list of strings or a valid file path, but got {type(features)}")
+
         if verbose:
-            print(f"Profiling {len(features)} user-provided features.")
-        missing = [f for f in features if f not in all_f_names]
+            print(f"Profiling {len(features_to_analyze)} user-provided features.")
+        missing = [f for f in features_to_analyze if f not in all_f_names]
         if missing:
             raise ValueError(f"The following features were not found in the data: {missing}")
-        features_to_analyze = features
     else:
+        # Default behavior: use all features
         if verbose:
-            print(f"Warning: Profiling all {len(all_f_names)} features. This may be slow and memory-intensive.")
+            print(f"Warning: No feature file provided. Profiling all {len(all_f_names)} features. This may be slow and memory-intensive.")
         features_to_analyze = all_f_names
+    # --- END REFACTOR ---
 
     if not features_to_analyze:
         print("Warning: No features to analyze. Returning empty DataFrame.")
@@ -65,7 +81,7 @@ def get_feature_profiles(
         features_to_analyze=features_to_analyze,
         all_feature_names=all_f_names,
         group_labels=group_labels,
-        condition_labels=batch_labels, 
+        condition_labels=condition_labels, 
         specificity_metric=specificity_metric,
         background_rate=background_rate,
         n_jobs=n_jobs,
@@ -75,7 +91,6 @@ def get_feature_profiles(
     if results_df.empty:
         return results_df
         
-    # Sort the final DataFrame for better readability
     sorted_df = results_df.sort_values(
         by=['feature_id', 'norm_score'],
         ascending=[True, False]
@@ -87,7 +102,7 @@ def get_feature_profiles(
 def find_marker_features(
     data: Union[AnnData, pd.DataFrame, np.ndarray, spmatrix],
     group_by: str,
-    condition_by: str,
+    condition_by: Optional[str] = None,
     specificity_threshold: float = 0.7,
     min_pct_expressing: float = 10.0,
     fdr_marker_threshold: float = 0.05,

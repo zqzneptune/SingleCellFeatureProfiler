@@ -12,6 +12,7 @@ import pandas as pd
 from scipy.sparse import spmatrix, issparse
 
 from ._utils import _prepare_and_validate_inputs
+from ._logging import _log_and_print
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +20,6 @@ try:
     from anndata import AnnData
 except ImportError:
     AnnData = None
-
-
-def _log_and_print(msg: str, verbose: bool):
-    """Helper to log and optionally print a message."""
-    logger.info(msg)
-    if verbose:
-        print(msg)
 
 
 def _calculate_sparse_variance(matrix: spmatrix) -> np.ndarray:
@@ -70,61 +64,64 @@ def select_marker_candidates(
     n_cells_detected = np.asarray((expression_matrix > expression_threshold).sum(axis=0)).flatten()
     freq = n_cells_detected / n_cells
     
+    freq_mask = (freq >= min_freq) & (freq <= max_freq)
+    _log_and_print(f"  - Passed frequency filter ({min_freq} <= freq <= {max_freq}): {freq_mask.sum()} features remaining.", verbose)
+    
     mean_expr = np.asarray(expression_matrix.mean(axis=0)).flatten()
     var_expr = _calculate_sparse_variance(expression_matrix) if issparse(expression_matrix) else np.var(expression_matrix, axis=0)
     
-    # Use np.errstate to avoid warnings for division by zero, which we handle
     with np.errstate(divide='ignore', invalid='ignore'):
         var_mean_ratio = np.nan_to_num(var_expr / mean_expr)
 
-    # Combine all Tier 1 boolean masks
-    candidate_mask = (
-        (freq >= min_freq) &
-        (freq <= max_freq) &
-        (var_mean_ratio > var_mean_ratio_min)
-    )
+    var_mean_mask = var_mean_ratio > var_mean_ratio_min
     
-    tier1_indices = np.where(candidate_mask)[0]
-    _log_and_print(f"  {len(tier1_indices)} features passed Tier 1.", verbose)
+    candidate_mask = freq_mask & var_mean_mask
+    _log_and_print(f"  - Passed var/mean filter (>{var_mean_ratio_min}): {candidate_mask.sum()} features remaining.", verbose)
 
     # --- Tiers 2 & 3: Distribution Shape Filters (Iterative) ---
+    tier1_indices = np.where(candidate_mask)[0]
     if not tier1_indices.any():
-        _log_and_print("No features passed Tier 1. Returning empty list.", verbose)
+        _log_and_print("\nNo features passed Tier 1. Returning empty list.", verbose)
         return []
         
-    _log_and_print("Running Tiers 2 & 3 filters (Distribution Shape)...", verbose)
+    _log_and_print("\nRunning Tiers 2 & 3 filters (Distribution Shape)...", verbose)
     
-    final_candidate_indices = []
-    for i in tier1_indices:
-        if issparse(expression_matrix):
-            # .data is the most efficient way to get non-zero values from a CSR/CSC column slice
-            non_zero_expr = expression_matrix[:, i].data
-        else:
-            col_data = expression_matrix[:, i]
-            non_zero_expr = col_data[col_data > expression_threshold]
+    candidate_indices = tier1_indices
+    
+    # Tier 2a: Gap Statistic
+    passed_indices = []
+    for i in candidate_indices:
+        non_zero_expr = expression_matrix[:, i].data if issparse(expression_matrix) else expression_matrix[expression_matrix[:, i] > expression_threshold, i]
+        if len(non_zero_expr) < 2: continue
+        if np.percentile(non_zero_expr, 10) > gap_stat_min * (expression_threshold + 1e-9):
+            passed_indices.append(i)
+    _log_and_print(f"  - Passed Gap Statistic filter (>{gap_stat_min}): {len(passed_indices)} features remaining.", verbose)
+    candidate_indices = passed_indices
 
-        if len(non_zero_expr) < 2:
-            continue
+    # Tier 2b: Right-Tail Heaviness
+    passed_indices = []
+    for i in candidate_indices:
+        non_zero_expr = expression_matrix[:, i].data if issparse(expression_matrix) else expression_matrix[expression_matrix[:, i] > expression_threshold, i]
+        if len(non_zero_expr) < 2: continue
+        p50, p90 = np.percentile(non_zero_expr, [50, 90])
+        if p50 > 1e-9 and (p90 / p50) > right_tail_min:
+            passed_indices.append(i)
+    _log_and_print(f"  - Passed Right-Tail filter (>{right_tail_min}): {len(passed_indices)} features remaining.", verbose)
+    candidate_indices = passed_indices
 
-        p10, p50, p90 = np.percentile(non_zero_expr, [10, 50, 90])
-
-        # Gap Statistic
-        if p10 <= gap_stat_min * (expression_threshold + 1e-9):
-            continue
-
-        # Right-Tail Heaviness
-        if p50 <= 1e-9 or (p90 / p50) <= right_tail_min:
-            continue
-            
-        # Optional CV Filter
-        if cv_min is not None:
+    # Tier 3: Coefficient of Variation
+    if cv_min is not None:
+        passed_indices = []
+        for i in candidate_indices:
+            non_zero_expr = expression_matrix[:, i].data if issparse(expression_matrix) else expression_matrix[expression_matrix[:, i] > expression_threshold, i]
+            if len(non_zero_expr) < 2: continue
             mean_val = np.mean(non_zero_expr)
-            if mean_val <= 1e-9 or (np.std(non_zero_expr) / mean_val) <= cv_min:
-                continue
+            if mean_val > 1e-9 and (np.std(non_zero_expr) / mean_val) > cv_min:
+                passed_indices.append(i)
+        _log_and_print(f"  - Passed CV filter (>{cv_min}): {len(passed_indices)} features remaining.", verbose)
+        candidate_indices = passed_indices
 
-        final_candidate_indices.append(i)
-
-    _log_and_print(f"  {len(final_candidate_indices)} features passed Tiers 2 & 3.", verbose)
+    final_candidate_indices = candidate_indices
     _log_and_print("-" * 35, verbose)
 
     return [f_names[i] for i in final_candidate_indices]

@@ -10,13 +10,12 @@ from typing import List, Optional, Union
 import numpy as np
 import pandas as pd
 from scipy.sparse import spmatrix
-from joblib import Parallel, delayed, parallel_backend
+from joblib import Parallel, delayed, parallel_backend, cpu_count
 from statsmodels.stats.multitest import multipletests
 
 from ._core import _analyze_one_feature
-from ._stability import _calculate_stability_scores
 from ._logging import _log_and_print
-from joblib import Parallel, delayed, parallel_backend, cpu_count
+
 try:
     from anndata import AnnData
     ANNDATA_AVAILABLE = True
@@ -34,7 +33,7 @@ def _worker_function(
     **kwargs
 ) -> pd.DataFrame:
     """
-    Simplified worker function that only runs the per-condition analysis.
+    Worker function that runs the per-condition analysis for one feature.
     """
     if is_backed:
         import anndata
@@ -65,8 +64,8 @@ def _run_profiling_engine(
     verbose: bool = True
 ) -> pd.DataFrame:
     """
-    Orchestrates analysis, builds the full per-condition table in memory,
-    then performs FDR and stability calculations.
+    Orchestrates analysis and returns the full per-condition table.
+    FDR correction is done here, but aggregation is left to downstream functions.
     """
     feature_index_map = {name: i for i, name in enumerate(all_feature_names)}
     
@@ -86,16 +85,12 @@ def _run_profiling_engine(
     else:
         expr_data_for_worker = expression_data
 
-    # --- Enhanced Verbosity ---
-    n_features = len(features_to_analyze)
-    n_groups = len(np.unique(group_labels))
-    n_conditions = len(np.unique(condition_labels)) if condition_labels is not None else 1
-    # --- FIX: Accurately report the number of workers ---
     actual_jobs = n_jobs if n_jobs > 0 else cpu_count()
+    n_jobs_str = f"{n_jobs} (resolved to {actual_jobs} workers)" if n_jobs == -1 else str(actual_jobs)
     msg = (
-        f"\n--- Profiling {n_features} features across {n_groups} groups "
-        f"and {n_conditions} condition(s) ---\n"
-        f"Using {actual_jobs} CPU cores for parallel computation..."
+        f"\n--- Profiling {len(features_to_analyze)} features across {len(np.unique(group_labels))} groups "
+        f"and {len(np.unique(condition_labels)) if condition_labels is not None else 1} condition(s) ---\n"
+        f"Starting parallel computation with n_jobs={n_jobs_str}..."
     )
     _log_and_print(msg, verbose)
 
@@ -111,20 +106,16 @@ def _run_profiling_engine(
         )
     
     _log_and_print("... Parallel computation complete.", verbose)
-    _log_and_print("\n--- Finalizing results ---", verbose)
     
     if not list_of_per_condition_results:
         return pd.DataFrame()
         
     per_condition_df = pd.concat(list_of_per_condition_results, ignore_index=True)
+    
+    _log_and_print("\n--- Finalizing results ---", verbose)
     _log_and_print(f"  - Collected {len(per_condition_df)} per-condition observations.", verbose)
     
     _log_and_print("  - Applying FDR correction for presence...", verbose)
     per_condition_df['fdr_presence'] = multipletests(per_condition_df['p_val_presence'], method='fdr_bh')[1]
     
-    _log_and_print("  - Aggregating results and calculating stability scores...", verbose)
-    specificity_col = f'specificity_{specificity_metric}'
-    final_df = _calculate_stability_scores(per_condition_df, specificity_col)
-    _log_and_print(f"  - Final aggregated table has {len(final_df)} rows.", verbose)
-    
-    return final_df
+    return per_condition_df

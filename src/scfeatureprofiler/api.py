@@ -36,46 +36,44 @@ def get_feature_profiles(
 ) -> pd.DataFrame:
     """
     Provides a complete statistical profile for features across all groups.
+    If `condition_by` is provided, the output is a detailed per-condition table.
     """
-    # Note: `batch_by` is now aliased to `condition_by` for internal consistency
     expression_matrix, all_f_names, group_labels, condition_labels = _prepare_and_validate_inputs(
         data=data,
         group_by=group_by,
         feature_names=feature_names,
-        batch_by=condition_by
+        condition_by=condition_by
     )
 
-    # --- REFACTORED: New logic for feature selection ---
-    features_to_analyze = []
+    feature_list = None
     if features is not None:
         if isinstance(features, str) and os.path.exists(features):
-            # If `features` is a path to a file, read it
             if verbose:
                 print(f"Loading features from file: {features}")
             with open(features, 'r') as f:
-                features_to_analyze = [line.strip() for line in f if line.strip()]
+                feature_list = [line.strip() for line in f if line.strip()]
         elif isinstance(features, list):
-            # If `features` is a list
-            features_to_analyze = features
+            feature_list = features
         else:
             raise TypeError(f"`features` must be a list of strings or a valid file path, but got {type(features)}")
 
+    if feature_list is not None:
         if verbose:
-            print(f"Profiling {len(features_to_analyze)} user-provided features.")
-        missing = [f for f in features_to_analyze if f not in all_f_names]
+            print(f"Profiling {len(feature_list)} user-provided features.")
+        missing = [f for f in feature_list if f not in all_f_names]
         if missing:
             raise ValueError(f"The following features were not found in the data: {missing}")
+        features_to_analyze = feature_list
     else:
-        # Default behavior: use all features
         if verbose:
             print(f"Warning: No feature file provided. Profiling all {len(all_f_names)} features. This may be slow and memory-intensive.")
         features_to_analyze = all_f_names
-    # --- END REFACTOR ---
 
     if not features_to_analyze:
         print("Warning: No features to analyze. Returning empty DataFrame.")
         return pd.DataFrame()
 
+    # The engine now correctly returns the detailed per-condition (or per-group) table
     results_df = _run_profiling_engine(
         expression_data=data if (ANNDATA_AVAILABLE and isinstance(data, AnnData)) else expression_matrix,
         features_to_analyze=features_to_analyze,
@@ -91,12 +89,12 @@ def get_feature_profiles(
     if results_df.empty:
         return results_df
         
-    sorted_df = results_df.sort_values(
-        by=['feature_id', 'norm_score'],
-        ascending=[True, False]
-    ).reset_index(drop=True)
-    
-    return sorted_df
+    # Sorting is now done on the aggregated table from stability, but we can do a simple one here
+    sort_keys = ['feature_id', 'group']
+    if 'condition' in results_df.columns:
+        sort_keys.append('condition')
+        
+    return results_df.sort_values(by=sort_keys).reset_index(drop=True)
 
 
 def find_marker_features(
@@ -122,7 +120,7 @@ def find_marker_features(
         print("Finding robust marker features using a data-driven pipeline...")
 
     expression_matrix, all_f_names, group_labels, condition_labels = _prepare_and_validate_inputs(
-        data, group_by=group_by, batch_by=condition_by
+        data, group_by=group_by, condition_by=condition_by
     )
     
     if condition_labels is not None and len(np.unique(condition_labels)) == 1:
@@ -142,6 +140,7 @@ def find_marker_features(
             print("Warning: No candidate features found after selection. Returning empty DataFrame.")
         return pd.DataFrame()
 
+    # Step 1: Get the detailed per-condition profiles from the engine
     per_condition_profiles = _run_profiling_engine(
         expression_data=data if (ANNDATA_AVAILABLE and isinstance(data, AnnData)) else expression_matrix, 
         features_to_analyze=candidate_features,
@@ -157,11 +156,12 @@ def find_marker_features(
     if per_condition_profiles.empty:
         return pd.DataFrame()
 
+    # Step 2: Aggregate results and calculate stability
     specificity_metric = kwargs.get('specificity_metric', 'tau')
     specificity_col = f'specificity_{specificity_metric}'
-    
     aggregated_markers = _calculate_stability_scores(per_condition_profiles, specificity_col)
 
+    # Step 3: Filter the final aggregated table
     final_markers_df = aggregated_markers[
         (aggregated_markers[specificity_col] >= specificity_threshold) &
         (aggregated_markers['pct_expressing'] >= min_pct_expressing) &
@@ -169,7 +169,11 @@ def find_marker_features(
         (aggregated_markers['log2fc_all'] > 0)
     ].copy()
 
-    return final_markers_df
+    # Final sort is now handled within _calculate_stability_scores, but we can re-sort just in case
+    return final_markers_df.sort_values(
+        by=['group', 'fdr_marker', 'stability_score'],
+        ascending=[True, True, False]
+    ).reset_index(drop=True)
 
 
 def get_feature_activity(
@@ -194,10 +198,10 @@ def get_feature_activity(
 
     active_df.sort_values(by=['feature_id', 'norm_score'], ascending=[True, False], inplace=True)
 
-    grouped = active_df.groupby('feature_id')
+    grouped = active_df.groupby('feature_id', observed=True)
 
     if top_n is not None:
-        result_series = grouped.head(top_n).groupby('feature_id')['group'].apply(list)
+        result_series = grouped.head(top_n).groupby('feature_id', observed=True)['group'].apply(list)
     else:
         result_series = grouped['group'].apply(list)
 

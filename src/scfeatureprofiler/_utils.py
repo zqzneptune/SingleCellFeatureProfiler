@@ -22,7 +22,7 @@ def _prepare_and_validate_inputs(
     data: Union[AnnData, pd.DataFrame, np.ndarray, spmatrix],
     group_by: Union[str, list, np.ndarray, pd.Series],
     feature_names: Optional[List[str]] = None,
-    batch_by: Optional[Union[str, list, np.ndarray, pd.Series]] = None,
+    condition_by: Optional[Union[str, list, np.ndarray, pd.Series]] = None,
 ) -> Tuple[Union[np.ndarray, spmatrix, AnnData], List[str], np.ndarray, Optional[np.ndarray]]:
     """
     Validates and standardizes all input data for the profiling engine.
@@ -97,6 +97,6 @@ def _prepare_and_validate_inputs(
     if group_labels is None:
         raise ValueError("`group_by` is a required argument and cannot be None.")
         
-    batch_labels = process_labels(batch_by, n_cells, 'batch_by')
+    condition_labels = process_labels(condition_by, n_cells, 'condition_by')
 
-    return expression_matrix, feature_names, group_labels, batch_labels
+    return expression_matrix, feature_names, group_labels, condition_labels

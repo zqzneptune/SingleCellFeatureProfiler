@@ -4,7 +4,7 @@
 Command-Line Interface for SingleCellFeatureProfiler.
 """
 
-from typing import Optional
+from typing import Optional, List
 import time
 
 import typer
@@ -55,7 +55,11 @@ def profile(
     input_file: str = typer.Option(..., "--input", "-i", help="Path to input data file (CSV or H5AD)."),
     group_by: str = typer.Option(..., "--group-by", "-g", help="Path to group labels CSV file OR column name in adata.obs."),
     output_file: str = typer.Option("feature_profiles.csv", "--output", "-o", help="Path to save the output CSV file."),
-    features: Optional[str] = typer.Option(None, "--features", "-f", help="Path to a plain text file with one feature per line."),
+    features: Optional[str] = typer.Option(
+        None, 
+        "--features", "-f", 
+        help="Path to a feature file (one per line) OR a comma-separated string of feature names."
+    ),
     condition_by: Optional[str] = typer.Option(None, "--condition-by", "-c", help="Path to condition labels CSV file OR column name in adata.obs."),
     specificity_metric: str = typer.Option("tau", help="Specificity metric ('tau' or 'gini')."),
     n_jobs: int = typer.Option(-1, help="Number of parallel jobs (-1 for all)."),
@@ -86,11 +90,28 @@ def profile(
 
     group_labels = _read_labels(group_by) if ".csv" in group_by else group_by
     condition_labels = _read_labels(condition_by) if condition_by and ".csv" in condition_by else condition_by
-    
+    # --- REFACTORED: CLI now parses the features input ---
+    feature_list: Optional[List[str]] = None
+    if features:
+        import os
+        if os.path.exists(features):
+            # Input is a file path
+            typer.echo(f"Loading features from file: {features}")
+            with open(features, 'r') as f:
+                feature_list = [line.strip() for line in f if line.strip()]
+        else:
+            # Input is a comma-separated string
+            feature_list = [f.strip() for f in features.split(',')]
+    # --- END REFACTOR ---
+    if feature_list is None:
+        typer.secho(
+            "Warning: No features provided. Profiling ALL features in the dataset.",
+            fg=typer.colors.YELLOW
+        )
     results_df = get_feature_profiles(
         data=data, 
         group_by=group_labels, 
-        features=features, # Pass the file path directly to the API
+        features=feature_list,
         condition_by=condition_labels, 
         specificity_metric=specificity_metric, 
         n_jobs=n_jobs,

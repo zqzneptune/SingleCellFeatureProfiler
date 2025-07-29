@@ -2,6 +2,7 @@
 
 """
 Internal core engine for single-feature statistical calculations.
+This module is optimized for performance using NumPy and vectorized operations.
 """
 
 from typing import Optional
@@ -12,13 +13,6 @@ import pandas as pd
 from scipy.stats import binomtest, ranksums
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered")
-
-def _geometric_mean(array: np.ndarray) -> float:
-    """Helper for geometric mean on a numpy array."""
-    positive_values = array[array > 0]
-    if positive_values.size == 0:
-        return 0.0
-    return np.exp(np.log(positive_values).mean())
 
 def _calculate_specificity(scores: np.ndarray, metric: str) -> float:
     """Calculates a specificity score on a numpy array."""
@@ -50,37 +44,27 @@ def _analyze_one_feature(
     """
     Performs a full statistical analysis for a single feature using vectorized operations.
     """
-    # --- 1. Calculate per-condition statistics using NumPy ---
     unique_groups, group_indices = np.unique(labels_vector, return_inverse=True)
     n_groups = len(unique_groups)
+    is_expressing_mask = expression_vector > 0
 
     if condition_vector is not None:
         unique_conditions, cond_indices = np.unique(condition_vector, return_inverse=True)
         n_conditions = len(unique_conditions)
         
-        # Combine group and condition indices for a unique pairing
         combined_idx = group_indices * n_conditions + cond_indices
         unique_pairs, pair_indices = np.unique(combined_idx, return_inverse=True)
+        n_pairs = len(unique_pairs)
         
-        # Map back to group and condition
-        group_map = np.empty_like(unique_pairs)
-        cond_map = np.empty_like(unique_pairs)
+        group_map = np.empty(n_pairs, dtype=group_indices.dtype)
+        cond_map = np.empty(n_pairs, dtype=cond_indices.dtype)
         for i, pair_val in enumerate(unique_pairs):
             group_map[i] = pair_val // n_conditions
             cond_map[i] = pair_val % n_conditions
             
-        n_pairs = len(unique_pairs)
-        
-        # Vectorized aggregations using numpy sums on binned data
-        n_cells = np.bincount(pair_indices, minlength=n_pairs)
-        is_expressing = expression_vector > 0
-        n_expressing = np.bincount(pair_indices, weights=is_expressing, minlength=n_pairs)
+        n_cells = np.bincount(pair_indices, minlength=n_pairs).astype(np.int64)
+        n_expressing = np.bincount(pair_indices, weights=is_expressing_mask, minlength=n_pairs).astype(np.int64)
         sum_expr = np.bincount(pair_indices, weights=expression_vector, minlength=n_pairs)
-        
-        # --- FIX: Ensure k and n for binomtest are integers ---
-        n_cells = n_cells.astype(np.int64)
-        n_expressing = n_expressing.astype(np.int64)
-        # --- END FIX ---
         
         per_condition_stats = pd.DataFrame({
             'group': unique_groups[group_map],
@@ -90,73 +74,46 @@ def _analyze_one_feature(
             'mean_all': np.divide(sum_expr, n_cells, out=np.zeros_like(sum_expr, dtype=float), where=n_cells!=0)
         })
 
-        # Iterative part for stats that are harder to vectorize
-        mean_expressing_list = []
-        median_expressing_list = []
-        for i in range(n_pairs):
-            mask = pair_indices == i
-            expr_subset_expressing = expression_vector[mask & is_expressing]
-            if expr_subset_expressing.size > 0:
-                mean_expressing_list.append(expr_subset_expressing.mean())
-                median_expressing_list.append(np.median(expr_subset_expressing))
-            else:
-                mean_expressing_list.append(0.0)
-                median_expressing_list.append(0.0)
+        mean_expressing_list = [expression_vector[(pair_indices == i) & is_expressing_mask].mean() if n_expressing[i] > 0 else 0.0 for i in range(n_pairs)]
+        median_expressing_list = [np.median(expression_vector[(pair_indices == i) & is_expressing_mask]) if n_expressing[i] > 0 else 0.0 for i in range(n_pairs)]
+        
+        # --- FIX: Assign inside the block ---
         per_condition_stats['mean_expressing'] = mean_expressing_list
         per_condition_stats['median_expressing'] = median_expressing_list
-        
-    else: # No condition vector
-        n_cells = np.bincount(group_indices)
-        is_expressing = expression_vector > 0
-        n_expressing = np.bincount(group_indices, weights=is_expressing)
-        sum_expr = np.bincount(group_indices, weights=expression_vector)
-        
-        # --- FIX: Ensure k and n for binomtest are integers ---
-        n_cells = n_cells.astype(np.int64)
-        n_expressing = n_expressing.astype(np.int64)
-        # --- END FIX ---
-        
+
+    else: # No condition vector provided
+        n_cells = np.bincount(group_indices, minlength=n_groups).astype(np.int64)
+        n_expressing = np.bincount(group_indices, weights=is_expressing_mask, minlength=n_groups).astype(np.int64)
+        sum_expr = np.bincount(group_indices, weights=expression_vector, minlength=n_groups)
+
         per_condition_stats = pd.DataFrame({
             'group': unique_groups,
             'n_cells': n_cells,
             'n_expressing': n_expressing,
             'mean_all': np.divide(sum_expr, n_cells, out=np.zeros_like(sum_expr, dtype=float), where=n_cells!=0)
         })
-        # ... (similar iterative block for mean/median expressing)
-        mean_expressing_list = [expression_vector[(group_indices == i) & is_expressing].mean() if n_expressing[i] > 0 else 0 for i in range(n_groups)]
-        median_expressing_list = [np.median(expression_vector[(group_indices == i) & is_expressing]) if n_expressing[i] > 0 else 0 for i in range(n_groups)]
+        mean_expressing_list = [expression_vector[(group_indices == i) & is_expressing_mask].mean() if n_expressing[i] > 0 else 0.0 for i in range(n_groups)]
+        median_expressing_list = [np.median(expression_vector[(group_indices == i) & is_expressing_mask]) if n_expressing[i] > 0 else 0.0 for i in range(n_groups)]
+        
+        # --- FIX: Assign inside the block ---
         per_condition_stats['mean_expressing'] = mean_expressing_list
         per_condition_stats['median_expressing'] = median_expressing_list
 
     per_condition_stats['pct_expressing'] = (per_condition_stats['n_expressing'] / per_condition_stats['n_cells']) * 100
     
-    # Vectorized binomial test using scipy.stats
-    # --- FIX: Use .apply() for the binomial test to ensure scalar integer inputs ---
-    per_condition_stats['p_val_presence'] = per_condition_stats.apply(
-        lambda row: binomtest(
-            k=int(row['n_expressing']), 
-            n=int(row['n_cells']),
-            p=background_rate, 
-            alternative='greater'
-        ).pvalue,
-        axis=1
-    )
-    # --- END FIX ---
+    # --- FIX: Revert to the most robust implementation for binomtest ---
+    p_vals = []
+    for _, row in per_condition_stats.iterrows():
+        p_vals.append(binomtest(k=int(row['n_expressing']), n=int(row['n_cells']), p=background_rate, alternative='greater').pvalue)
+    per_condition_stats['p_val_presence'] = p_vals
 
     # --- 2. Calculate per-group (cross-condition) statistics ---
     group_level_stats = []
-    
-    # Aggregate per-condition stats to get overall pct_expressing for scoring
     agg_pct = per_condition_stats.groupby('group')['pct_expressing'].mean()
     
-    # Calculate norm_score and specificity based on the aggregated scores
     all_scores = agg_pct.values
     max_score, min_score = all_scores.max(), all_scores.min()
-    if max_score > min_score:
-        norm_scores_vals = (all_scores - min_score) / (max_score - min_score)
-    else:
-        norm_scores_vals = np.zeros_like(all_scores)
-    
+    norm_scores_vals = (all_scores - min_score) / (max_score - min_score) if max_score > min_score else np.zeros_like(all_scores)
     norm_scores_map = dict(zip(agg_pct.index, norm_scores_vals))
     specificity = _calculate_specificity(all_scores, metric=specificity_metric)
     

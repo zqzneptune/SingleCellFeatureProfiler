@@ -45,7 +45,13 @@ def select_marker_candidates(
     Selects candidate marker features using a tiered, data-driven filtering approach.
     """
     _log_and_print("--- Selecting marker candidates ---", verbose)
-
+    
+    # --- FIX: Add a safeguard for empty input data ---
+    if data.shape[0] == 0:
+        _log_and_print("  Input data contains zero cells. Returning empty list.", verbose)
+        return []
+    # --- END FIX ---
+    
     expression_matrix, f_names, _, _ = _prepare_and_validate_inputs(
         data=data,
         group_by=np.arange(data.shape[0]),

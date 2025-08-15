@@ -87,31 +87,15 @@ def profile(
             typer.echo("\r", nl=False)
         typer.echo("                                                          \r", nl=False)
 
-
     group_labels = _read_labels(group_by) if ".csv" in group_by else group_by
     condition_labels = _read_labels(condition_by) if condition_by and ".csv" in condition_by else condition_by
-    # --- REFACTORED: CLI now parses the features input ---
-    feature_list: Optional[List[str]] = None
-    if features:
-        import os
-        if os.path.exists(features):
-            # Input is a file path
-            typer.echo(f"Loading features from file: {features}")
-            with open(features, 'r') as f:
-                feature_list = [line.strip() for line in f if line.strip()]
-        else:
-            # Input is a comma-separated string
-            feature_list = [f.strip() for f in features.split(',')]
-    # --- END REFACTOR ---
-    if feature_list is None:
-        typer.secho(
-            "Warning: No features provided. Profiling ALL features in the dataset.",
-            fg=typer.colors.YELLOW
-        )
+    
+    # --- REFACTORED: The logic for parsing 'features' is now in the API. ---
+    # We simply pass the string argument directly.
     results_df = get_feature_profiles(
         data=data, 
         group_by=group_labels, 
-        features=feature_list,
+        features=features,
         condition_by=condition_labels, 
         specificity_metric=specificity_metric, 
         n_jobs=n_jobs,

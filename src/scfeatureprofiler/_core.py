@@ -10,7 +10,8 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.stats import binomtest, ranksums
+# --- REFACTORED: Import binom instead of binomtest ---
+from scipy.stats import binom, ranksums
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered")
 
@@ -44,6 +45,7 @@ def _analyze_one_feature(
     """
     Performs a full statistical analysis for a single feature using vectorized operations.
     """
+    # --- 1. Setup Indices and Initial DataFrame ---
     unique_groups, group_indices = np.unique(labels_vector, return_inverse=True)
     n_groups = len(unique_groups)
     is_expressing_mask = expression_vector > 0
@@ -54,60 +56,63 @@ def _analyze_one_feature(
         
         combined_idx = group_indices * n_conditions + cond_indices
         unique_pairs, pair_indices = np.unique(combined_idx, return_inverse=True)
-        n_pairs = len(unique_pairs)
+        n_items = len(unique_pairs)
         
-        group_map = np.empty(n_pairs, dtype=group_indices.dtype)
-        cond_map = np.empty(n_pairs, dtype=cond_indices.dtype)
+        group_map = np.empty(n_items, dtype=group_indices.dtype)
+        cond_map = np.empty(n_items, dtype=cond_indices.dtype)
         for i, pair_val in enumerate(unique_pairs):
             group_map[i] = pair_val // n_conditions
             cond_map[i] = pair_val % n_conditions
-            
-        n_cells = np.bincount(pair_indices, minlength=n_pairs).astype(np.int64)
-        n_expressing = np.bincount(pair_indices, weights=is_expressing_mask, minlength=n_pairs).astype(np.int64)
-        sum_expr = np.bincount(pair_indices, weights=expression_vector, minlength=n_pairs)
         
+        indices_to_use = pair_indices
         per_condition_stats = pd.DataFrame({
             'group': unique_groups[group_map],
             'condition': unique_conditions[cond_map],
-            'n_cells': n_cells,
-            'n_expressing': n_expressing,
-            'mean_all': np.divide(sum_expr, n_cells, out=np.zeros_like(sum_expr, dtype=float), where=n_cells!=0)
         })
+    else:
+        indices_to_use = group_indices
+        n_items = n_groups
+        per_condition_stats = pd.DataFrame({'group': unique_groups})
 
-        mean_expressing_list = [expression_vector[(pair_indices == i) & is_expressing_mask].mean() if n_expressing[i] > 0 else 0.0 for i in range(n_pairs)]
-        median_expressing_list = [np.median(expression_vector[(pair_indices == i) & is_expressing_mask]) if n_expressing[i] > 0 else 0.0 for i in range(n_pairs)]
-        
-        # --- FIX: Assign inside the block ---
-        per_condition_stats['mean_expressing'] = mean_expressing_list
-        per_condition_stats['median_expressing'] = median_expressing_list
-
-    else: # No condition vector provided
-        n_cells = np.bincount(group_indices, minlength=n_groups).astype(np.int64)
-        n_expressing = np.bincount(group_indices, weights=is_expressing_mask, minlength=n_groups).astype(np.int64)
-        sum_expr = np.bincount(group_indices, weights=expression_vector, minlength=n_groups)
-
-        per_condition_stats = pd.DataFrame({
-            'group': unique_groups,
-            'n_cells': n_cells,
-            'n_expressing': n_expressing,
-            'mean_all': np.divide(sum_expr, n_cells, out=np.zeros_like(sum_expr, dtype=float), where=n_cells!=0)
-        })
-        mean_expressing_list = [expression_vector[(group_indices == i) & is_expressing_mask].mean() if n_expressing[i] > 0 else 0.0 for i in range(n_groups)]
-        median_expressing_list = [np.median(expression_vector[(group_indices == i) & is_expressing_mask]) if n_expressing[i] > 0 else 0.0 for i in range(n_groups)]
-        
-        # --- FIX: Assign inside the block ---
-        per_condition_stats['mean_expressing'] = mean_expressing_list
-        per_condition_stats['median_expressing'] = median_expressing_list
-
-    per_condition_stats['pct_expressing'] = (per_condition_stats['n_expressing'] / per_condition_stats['n_cells']) * 100
+    # --- 2. Vectorized Primary Calculations ---
+    n_cells = np.bincount(indices_to_use, minlength=n_items).astype(np.int64)
+    n_expressing = np.bincount(indices_to_use, weights=is_expressing_mask, minlength=n_items).astype(np.int64)
+    sum_expr = np.bincount(indices_to_use, weights=expression_vector, minlength=n_items)
     
-    # --- FIX: Revert to the most robust implementation for binomtest ---
-    p_vals = []
-    for _, row in per_condition_stats.iterrows():
-        p_vals.append(binomtest(k=int(row['n_expressing']), n=int(row['n_cells']), p=background_rate, alternative='greater').pvalue)
-    per_condition_stats['p_val_presence'] = p_vals
+    per_condition_stats['n_cells'] = n_cells
+    per_condition_stats['n_expressing'] = n_expressing
+    per_condition_stats['mean_all'] = np.divide(sum_expr, n_cells, out=np.zeros_like(sum_expr, dtype=float), where=n_cells!=0)
+    
+    # --- 3. Vectorized Mean/Median Expressing Calculation ---
+    if np.any(is_expressing_mask):
+        expr_df = pd.DataFrame({
+            'expr': expression_vector[is_expressing_mask],
+            'idx': indices_to_use[is_expressing_mask]
+        })
+        grouped_stats = expr_df.groupby('idx')['expr'].agg(['mean', 'median'])
+        grouped_stats = grouped_stats.reindex(range(n_items), fill_value=0.0)
+        
+        per_condition_stats['mean_expressing'] = grouped_stats['mean'].values
+        per_condition_stats['median_expressing'] = grouped_stats['median'].values
+    else:
+        per_condition_stats['mean_expressing'] = 0.0
+        per_condition_stats['median_expressing'] = 0.0
+    
+    # --- 4. Remaining per-condition calculations ---
+    # Using safe division for percentage calculation
+    pct_expr = np.divide(n_expressing * 100, n_cells, out=np.zeros_like(n_expressing, dtype=float), where=n_cells!=0)
+    per_condition_stats['pct_expressing'] = pct_expr
+    
+    # --- REFACTORED: Vectorized Binomial Test for presence p-value ---
+    # The survival function sf(k, n, p) is P(X > k). 
+    # The 'greater' alternative in binomtest is P(X >= k), which is equivalent to P(X > k-1).
+    per_condition_stats['p_val_presence'] = binom.sf(
+        k=n_expressing - 1,
+        n=n_cells,
+        p=background_rate
+    )
 
-    # --- 2. Calculate per-group (cross-condition) statistics ---
+    # --- 5. Calculate per-group (cross-condition) statistics ---
     group_level_stats = []
     agg_pct = per_condition_stats.groupby('group')['pct_expressing'].mean()
     
@@ -138,7 +143,7 @@ def _analyze_one_feature(
     
     group_level_df = pd.DataFrame(group_level_stats)
 
-    # --- 3. Merge and Finalize ---
+    # --- 6. Merge and Finalize ---
     final_df = pd.merge(per_condition_stats, group_level_df, on='group')
     final_df['feature_id'] = feature_name
     

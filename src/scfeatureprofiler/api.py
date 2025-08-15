@@ -45,17 +45,26 @@ def get_feature_profiles(
         condition_by=condition_by
     )
 
+    # --- REFACTORED: API now handles all feature input types directly ---
     feature_list = None
     if features is not None:
-        if isinstance(features, str) and os.path.exists(features):
-            if verbose:
-                print(f"Loading features from file: {features}")
-            with open(features, 'r') as f:
-                feature_list = [line.strip() for line in f if line.strip()]
-        elif isinstance(features, list):
+        if isinstance(features, list):
             feature_list = features
+        elif isinstance(features, str):
+            if os.path.exists(features):
+                if verbose:
+                    print(f"Loading features from file: {features}")
+                with open(features, 'r') as f:
+                    feature_list = [line.strip() for line in f if line.strip()]
+            else:
+                if verbose:
+                    print("Parsing features from comma-separated string.")
+                feature_list = [f.strip() for f in features.split(',')]
         else:
-            raise TypeError(f"`features` must be a list of strings or a valid file path, but got {type(features)}")
+            raise TypeError(
+                "`features` must be a list of strings, a valid file path, "
+                f"or a comma-separated string, but got {type(features)}"
+            )
 
     if feature_list is not None:
         if verbose:
@@ -73,7 +82,6 @@ def get_feature_profiles(
         print("Warning: No features to analyze. Returning empty DataFrame.")
         return pd.DataFrame()
 
-    # The engine now correctly returns the detailed per-condition (or per-group) table
     results_df = _run_profiling_engine(
         expression_data=data if (ANNDATA_AVAILABLE and isinstance(data, AnnData)) else expression_matrix,
         features_to_analyze=features_to_analyze,
@@ -89,7 +97,6 @@ def get_feature_profiles(
     if results_df.empty:
         return results_df
         
-    # Sorting is now done on the aggregated table from stability, but we can do a simple one here
     sort_keys = ['feature_id', 'group']
     if 'condition' in results_df.columns:
         sort_keys.append('condition')
@@ -140,7 +147,6 @@ def find_marker_features(
             print("Warning: No candidate features found after selection. Returning empty DataFrame.")
         return pd.DataFrame()
 
-    # Step 1: Get the detailed per-condition profiles from the engine
     per_condition_profiles = _run_profiling_engine(
         expression_data=data if (ANNDATA_AVAILABLE and isinstance(data, AnnData)) else expression_matrix, 
         features_to_analyze=candidate_features,
@@ -156,12 +162,10 @@ def find_marker_features(
     if per_condition_profiles.empty:
         return pd.DataFrame()
 
-    # Step 2: Aggregate results and calculate stability
     specificity_metric = kwargs.get('specificity_metric', 'tau')
     specificity_col = f'specificity_{specificity_metric}'
     aggregated_markers = _calculate_stability_scores(per_condition_profiles, specificity_col)
 
-    # Step 3: Filter the final aggregated table
     final_markers_df = aggregated_markers[
         (aggregated_markers[specificity_col] >= specificity_threshold) &
         (aggregated_markers['pct_expressing'] >= min_pct_expressing) &
@@ -169,7 +173,6 @@ def find_marker_features(
         (aggregated_markers['log2fc_all'] > 0)
     ].copy()
 
-    # Final sort is now handled within _calculate_stability_scores, but we can re-sort just in case
     return final_markers_df.sort_values(
         by=['group', 'fdr_marker', 'stability_score'],
         ascending=[True, True, False]

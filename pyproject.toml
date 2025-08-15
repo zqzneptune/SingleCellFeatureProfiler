@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scfeatureprofiler"
 
-version = "1.1.1"
+version = "1.1.2"
 
 description = "A powerful, multi-interface Python package for deep characterization of single-cell feature expression patterns."
 readme = "README.md"

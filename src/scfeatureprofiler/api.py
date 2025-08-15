@@ -10,11 +10,14 @@ import os
 import numpy as np
 import pandas as pd
 from scipy.sparse import spmatrix
-
+from sklearn.metrics import silhouette_samples, silhouette_score
+import anndata as ad
 from ._utils import _prepare_and_validate_inputs
 from ._engine import _run_profiling_engine
 from ._selection_marker import select_marker_candidates
 from ._stability import _calculate_stability_scores
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import minmax_scale
 
 try:
     from anndata import AnnData
@@ -209,3 +212,143 @@ def get_feature_activity(
         result_series = grouped['group'].apply(list)
 
     return result_series.to_dict()
+
+def evaluate_clustering(
+    adata: ad.AnnData,
+    cluster_key: str,
+    use_rep: str = 'X_pca',
+    verbose: bool = True
+) -> pd.DataFrame:
+    """
+    Evaluates the quality of clustering using the Silhouette Score.
+
+    This function provides a quantitative measure of how dense and well-separated
+    the clusters are. It helps identify ambiguous or poorly-defined clusters
+    before proceeding with downstream analysis like marker gene detection.
+
+    Args:
+        adata (anndata.AnnData): The annotated data matrix.
+        cluster_key (str): The key in `adata.obs` where the cluster labels are stored.
+        use_rep (str): The representation in `adata.obsm` to use for calculating
+            distances (e.g., 'X_pca', 'X_umap'). PCA is recommended.
+        verbose (bool): If True, prints a summary of the results.
+
+    Returns:
+        pd.DataFrame: A DataFrame with the average silhouette score and size
+            for each cluster, sorted by score.
+    """
+    if use_rep not in adata.obsm:
+        raise ValueError(f"Representation '{use_rep}' not found in adata.obsm.")
+    if cluster_key not in adata.obs:
+        raise ValueError(f"Cluster key '{cluster_key}' not found in adata.obs.")
+
+    # Calculate silhouette score for each cell
+    X = adata.obsm[use_rep]
+    labels = adata.obs[cluster_key]
+    
+    # Add per-cell scores to adata for detailed inspection
+    adata.obs[f'silhouette_{cluster_key}'] = silhouette_samples(X, labels)
+    
+    # Calculate overall average score
+    overall_score = adata.obs[f'silhouette_{cluster_key}'].mean()
+    
+    # Calculate per-cluster average scores
+    cluster_scores = adata.obs.groupby(cluster_key, observed=True)[f'silhouette_{cluster_key}'].mean()
+    cluster_sizes = adata.obs[cluster_key].value_counts()
+    
+    # Create a summary DataFrame
+    report_df = pd.DataFrame({
+        'avg_silhouette_score': cluster_scores,
+        'n_cells': cluster_sizes
+    }).sort_values('avg_silhouette_score', ascending=False)
+
+    if verbose:
+        print("--- Clustering Quality Report ---")
+        print(f"Overall Average Silhouette Score: {overall_score:.3f}\n")
+        print("Per-Cluster Scores:")
+        print(report_df)
+        print("\nInterpretation Guide:")
+        print("  > 0.5: Strong, well-separated cluster.")
+        print("  > 0.25: Reasonable cluster structure.")
+        print("  < 0.1: Weak or overlapping structure. Interpret markers with caution.")
+        print("  < 0: Potential misclassifications.")
+        print("---------------------------------")
+        
+    return report_df
+
+def select_robust_markers(
+    ranked_markers_df: pd.DataFrame,
+    top_n: int = 10,
+    fdr_threshold: float = 0.05,
+    verbose: bool = True
+) -> pd.DataFrame:
+    """
+    Automatically selects the top N robust markers per group using a dynamic,
+    data-driven clustering approach.
+
+    This function calculates a composite score for each potential marker and then
+    uses K-Means clustering (k=2) to find a natural cutoff between "good" and
+    "exceptional" markers, selecting from the exceptional group.
+
+    Args:
+        ranked_markers_df (pd.DataFrame): The DataFrame output from `find_marker_features`.
+        top_n (int): The number of top markers to select for each group.
+        fdr_threshold (float): Initial filtering step for statistical significance.
+        verbose (bool): If True, prints the dynamically determined threshold.
+
+    Returns:
+        pd.DataFrame: A filtered and sorted DataFrame containing the top N robust
+            markers for each group, with the new 'marker_score' column.
+    """
+    if ranked_markers_df.empty:
+        return pd.DataFrame()
+
+    # Step 1: Baseline filtering on significance
+    candidates = ranked_markers_df[ranked_markers_df['fdr_marker'] < fdr_threshold].copy()
+    if len(candidates) < 2: # Need at least 2 points to cluster
+        if verbose:
+            print(f"Warning: Not enough markers ({len(candidates)}) passed the initial FDR threshold of {fdr_threshold} to perform dynamic selection.")
+        return candidates
+
+    # Step 2: Create the composite marker score
+    spec_col = next((col for col in candidates.columns if 'specificity_' in col), None)
+    if not spec_col:
+        raise ValueError("Could not find a specificity column in the DataFrame.")
+        
+    metrics_to_scale = ['log2fc_all', spec_col, 'pct_expressing']
+    if 'stability_score' in candidates.columns:
+        metrics_to_scale.append('stability_score')
+
+    for metric in metrics_to_scale:
+        candidates[f'scaled_{metric}'] = minmax_scale(candidates[metric])
+    
+    candidates['marker_score'] = candidates[[f'scaled_{m}' for m in metrics_to_scale]].sum(axis=1)
+
+    # Step 3: Use K-Means to find the natural threshold in the marker_score
+    scores_for_clustering = candidates[['marker_score']].values
+    kmeans = KMeans(n_clusters=2, random_state=0, n_init='auto').fit(scores_for_clustering)
+    
+    # Identify which cluster label corresponds to "exceptional" markers
+    cluster_centers = kmeans.cluster_centers_
+    exceptional_cluster_label = np.argmax(cluster_centers)
+    
+    # The threshold is the minimum score in the exceptional cluster
+    exceptional_markers = candidates[kmeans.labels_ == exceptional_cluster_label]
+    dynamic_threshold = exceptional_markers['marker_score'].min()
+
+    if verbose:
+        print("--- Dynamic Marker Selection via Clustering ---")
+        print(f"  - Clustered {len(candidates)} candidate markers into two groups.")
+        print(f"  - Identified {len(exceptional_markers)} as 'exceptional'.")
+        print(f"  - Learned marker_score threshold: {dynamic_threshold:.3f}")
+        print("---------------------------------------------")
+
+    # Step 4: Select all markers above the learned threshold
+    final_candidates = candidates[candidates['marker_score'] >= dynamic_threshold].copy()
+    
+    # Step 5: Rank within each group and select top N
+    final_candidates.sort_values(by=['group', 'marker_score'], ascending=[True, False], inplace=True)
+    
+    top_markers_df = final_candidates.groupby('group').head(top_n).reset_index(drop=True)
+
+    return top_markers_df

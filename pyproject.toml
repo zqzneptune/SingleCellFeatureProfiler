@@ -62,7 +62,7 @@ all = [
 
 # Scripts section updated to the new, single Typer app entry point
 [project.scripts]
-scprofiler = "scfeatureprofiler.cli:app"
+scfeatureprofiler = "scfeatureprofiler.cli:app"
 
 
 [tool.setuptools.packages.find]

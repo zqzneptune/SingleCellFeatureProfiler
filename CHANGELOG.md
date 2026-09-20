@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-09-20
+
+### Added
+
+- Canonical feature profiles with explicit target-versus-all, one, and set
+  contrasts and separate coverage, effect, specificity, discrimination, and
+  cell-level statistical evidence.
+- Biological-replicate summaries, distinct cell/sample resampling, transparent
+  downstream selection, independent profile comparison, annotation-evidence
+  evaluation and visualization, and clustering geometry diagnostics.
+- Explicit AnnData `X`, raw, and layer selection; tested backed access; bounded
+  feature chunking and shared-memory profiling workers.
+- Thin canonical CLI adapters, complete reference documentation, and a runnable
+  seven-scenario scientific tutorial.
+
+### Changed
+
+- The primary `profile` CLI command now returns the canonical profile schema.
+  The prior result contract remains available through the hidden
+  `legacy-profile` command and `get_feature_profiles()` Python function.
+- `select_robust_markers()` and `evaluate_clustering()` are compatibility
+  wrappers with deprecation warnings; canonical alternatives avoid composite
+  marker scoring and biological-validity claims from clustering geometry.
+- Runtime metadata now declares `anndata` and `scikit-learn` directly instead of
+  relying on the unused `scanpy` dependency to provide them transitively.
+
+### Versioning
+
+- Reconciled the observed `1.1.2` baseline and the historical product-plan
+  discrepancy as a `2.0.0` release. The major version signals the breaking
+  primary CLI profile-contract change.
+
 ## [1.1.0] - 2025-07-27
 
 ### Added

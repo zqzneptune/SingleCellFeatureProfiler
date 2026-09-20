@@ -13,6 +13,7 @@ from scipy.sparse import spmatrix, issparse
 
 from ._utils import _prepare_and_validate_inputs
 from ._logging import _log_and_print
+from .models import ResolvedExpression
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +53,15 @@ def select_marker_candidates(
         return []
     # --- END FIX ---
     
-    expression_matrix, f_names, _, _ = _prepare_and_validate_inputs(
-        data=data,
-        group_by=np.arange(data.shape[0]),
-        feature_names=feature_names
-    )
+    if isinstance(data, ResolvedExpression):
+        expression_matrix = data.expression_matrix
+        f_names = data.feature_ids.tolist()
+    else:
+        expression_matrix, f_names, _, _ = _prepare_and_validate_inputs(
+            data=data,
+            group_by=np.arange(data.shape[0]),
+            feature_names=feature_names
+        )
 
     if issparse(expression_matrix) and expression_matrix.format != 'csr':
         expression_matrix = expression_matrix.tocsr()

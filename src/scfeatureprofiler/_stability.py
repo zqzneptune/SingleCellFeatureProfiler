@@ -35,6 +35,8 @@ def _calculate_stability_scores(
         'p_val_marker': 'first',
         specificity_metric_col: 'first'
     }
+    if 'expression_source' in per_condition_results.columns:
+        agg_rules['expression_source'] = 'first'
     
     agg_results = per_condition_results.groupby(['feature_id', 'group']).agg(agg_rules).reset_index()
 
@@ -68,6 +70,8 @@ def _calculate_stability_scores(
         'p_val_marker', 'fdr_marker',
         specificity_metric_col
     ]
+    if 'expression_source' in final_results.columns:
+        final_cols.append('expression_source')
     
     for col in final_cols:
         if col not in final_results.columns:

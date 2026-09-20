@@ -1,120 +1,155 @@
 # Single-Cell Feature Profiler
 
-[![PyPI version](https://badge.fury.io/py/scfeatureprofiler.svg)](https://badge.fury.io/py/scfeatureprofiler)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI version](https://badge.fury.io/py/scfeatureprofiler.svg)](https://pypi.org/project/scfeatureprofiler)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python versions](https://img.shields.io/pypi/pyversions/scfeatureprofiler.svg)](https://pypi.org/project/scfeatureprofiler)
 
-A powerful, fast, and user-friendly Python package for deep characterization of single-cell feature expression patterns.
+`scfeatureprofiler` is an interpretable framework for measuring molecular
+evidence connecting features to supplied cellular identities. It keeps coverage,
+specificity, effect, discrimination, cell-level statistical evidence,
+biological-sample reproducibility, and resampling uncertainty individually
+accessible instead of forcing them into one marker score.
 
-`scfeatureprofiler` provides a suite of statistical tools to analyze single-cell data (e.g., scRNA-seq, CITE-seq) and answer fundamental biological questions:
+## Why separate evidence dimensions?
 
-1.  **Cluster Quality:** Are my clusters well-defined and biologically meaningful?
-2.  **Marker Discovery:** Which features are robust and specific markers for each cell group?
-3.  **Feature Activity:** In which cell groups is a specific feature actively expressed?
+- High expression does not imply specificity.
+- High specificity does not imply broad target coverage.
+- A tiny effect can be highly significant when many cells are treated as
+  observations.
+- A pooled effect can be driven by one donor rather than reproduced across
+  biological samples.
+- One-versus-rest can hide behavior against the most relevant alternative.
+- Clustering geometry in one representation does not establish biological label
+  correctness.
 
-The package is designed for performance, with a parallelized backend that can handle extremely large datasets, including out-of-core analysis for data that doesn't fit into memory.
-
-## Key Features
-
--   **Multi-Interface:** Use it as a Python library in your Jupyter notebooks or as a command-line tool for script-based workflows.
--   **Flexible Input:** Works directly with `AnnData` objects, `pandas.DataFrame`, or `numpy` arrays.
--   **Robust Cluster Validation:** Includes an `evaluate_clustering` function using silhouette scores to quantify cluster quality *before* marker discovery.
--   **Data-Driven Marker Selection:** Implements a dynamic, clustering-based method to automatically identify the best markers without arbitrary thresholds.
--   **High Performance:** Parallelized using `joblib` to use all available CPU cores for rapid analysis.
--   **Scalable:** Supports out-of-core computation for memory-mapped `AnnData` objects, enabling analysis of millions of cells.
+The package therefore requires explicit contrasts, records the selected AnnData
+expression source, retains ambiguous or contradictory evidence, and keeps cell
+and biological-sample resampling distinct.
 
 ## Installation
-
-You can install `scfeatureprofiler` directly from PyPI:
 
 ```bash
 pip install scfeatureprofiler
 ```
 
-To include support for `AnnData` objects (recommended), install with the `[anndata]` extra:
+For development:
 
 ```bash
-pip install scfeatureprofiler[anndata]
-```
-
-To install all dependencies for development, use:
-```bash
-# Clone the repository first
 git clone https://github.com/zqzneptune/SingleCellFeatureProfiler.git
 cd SingleCellFeatureProfiler
-pip install -e ".[all]"
+pip install -e ".[dev]"
 ```
 
-## Quick Start
+The methodological refactor is versioned as `2.0.0`; the major version signals
+the changed primary CLI profile contract. Historical Python workflows remain
+available through compatibility interfaces described below.
 
-`scfeatureprofiler` is designed to be intuitive. Here are two examples for the most common use cases.
-
-### 1. Python API: The Complete Marker Discovery Workflow
-
-This is the recommended workflow inside a Jupyter notebook after you have performed clustering.
+## Canonical Python workflow
 
 ```python
-import scanpy as sc
-from scfeatureprofiler import evaluate_clustering, find_marker_features, select_robust_markers
-
-# 1. Load your clustered single-cell data
-adata = sc.read_h5ad("path/to/your_clustered_data.h5ad")
-
-# 2. (Recommended) Evaluate clustering quality first
-#    This helps ensure your clusters are meaningful before finding markers.
-cluster_report = evaluate_clustering(adata, cluster_key='leiden')
-#    A good cluster should have a silhouette score > 0.25.
-
-# 3. Find all potential marker features for your clusters
-#    This returns a comprehensive pandas DataFrame for deep exploration.
-all_markers_df = find_marker_features(
-    data=adata,
-    group_by='leiden'
+import anndata as ad
+from scfeatureprofiler import (
+    Contrast,
+    SelectionCriteria,
+    evaluate_annotation_evidence,
+    profile_features_by_sample,
+    select_profile_features,
 )
 
-# 4. Automatically select the top 10 best markers per cluster
-#    This function uses a data-driven method to find natural cutoffs.
-top_markers_df = select_robust_markers(all_markers_df, top_n=10)
+adata = ad.read_h5ad("cells.h5ad")
+contrast = Contrast.target_vs_one("CD8 T-cell", "CD4 T-cell")
 
-print("--- Top 5 Robust Markers for each Cluster ---")
-print(top_markers_df.groupby('group').head(5))
+result = profile_features_by_sample(
+    adata,
+    group_by="cell_type",
+    sample_by="donor",
+    features=["CD8A", "GZMB", "NKG7"],
+    contrasts=[contrast],
+    expression_source="layer:log1p",
+)
 
-# 5. Convert to a dictionary for Scanpy plotting functions
-top_markers_dict = top_markers_df.groupby('group')['feature_id'].apply(list).to_dict()
-sc.pl.dotplot(adata, top_markers_dict, groupby='leiden')
+# Apply only thresholds chosen for this analysis; none are biological defaults.
+selection = select_profile_features(
+    result.profiles,
+    SelectionCriteria(
+        min_target_detection_fraction=0.5,
+        min_mean_difference=0.5,
+        min_effect_recurrence_fraction=0.75,
+    ),
+)
+
+# Assess a user-supplied label and expectations; this does not auto-annotate.
+evidence = evaluate_annotation_evidence(
+    result.profiles,
+    proposed_label="CD8 T-cell",
+    expected_support_features=["CD8A"],
+)
 ```
 
-### 2. Command-Line (CLI): Find and Rank Markers
+`result.profiles` contains pooled feature-target-contrast evidence.
+`result.sample_profiles` separately retains every within-sample relationship,
+including insufficient samples. Selection returns both complete rule evaluation
+and selected rows; failed or contradictory evidence is not erased.
 
-If you prefer to work from the terminal, you can perform the entire marker discovery pipeline with a single command.
+## Explicit contrasts and expression sources
 
-**Input File:**
--   `my_data.h5ad`: An AnnData file with clustering results in `adata.obs['leiden']`.
+Canonical profiles support target-versus-all, target-versus-one, and
+target-versus-set contrasts. AnnData users choose `X`, `raw`, or
+`layer:<name>` explicitly; unavailable sources are errors rather than fallbacks.
+Dense NumPy, pandas, SciPy sparse, and AnnData inputs have equivalent numerical
+semantics where applicable.
 
-**Command:**
+## Command line
+
+The CLI calls the same Python APIs:
 
 ```bash
-scfeatureprofiler find-markers \
-    --input my_data.h5ad \
-    --group-by leiden \
-    --output ranked_markers.csv
+scfeatureprofiler profile \
+    --input cells.h5ad \
+    --group-by cell_type \
+    --target "CD8 T-cell" \
+    --alternative "CD4 T-cell" \
+    --features CD8A,GZMB,NKG7 \
+    --expression-source layer:log1p \
+    --output profiles.csv
+
+scfeatureprofiler select \
+    --profiles profiles.csv \
+    --min-target-detection-fraction 0.5 \
+    --min-mean-difference 0.5 \
+    --output selected.csv
 ```
 
-**Output (`ranked_markers.csv`):**
-This produces a detailed CSV file with all statistically significant markers, ranked by group and significance.
+`profile-samples` writes pooled and per-sample evidence separately.
+`diagnostics` writes cell, group, and overall clustering-geometry tables.
+Historical `find-markers`, `activity`, `get_feature_profiles()`, and
+`select_robust_markers()` interfaces remain for compatibility; new analyses
+should use canonical profiles and explicit selection.
 
-```csv
-feature_id,group,stability_score,norm_score,pct_expressing,log2fc_all,fdr_marker,...
-CD8A,CD8 T-cell,1.0,1.0,95.4,8.2,1.2e-250,...
-GZMB,CD8 T-cell,1.0,0.98,92.1,7.5,4.5e-245,...
-MS4A1,B-cell,1.0,1.0,98.2,9.5,8.1e-280,...
-...
-```
+## Performance boundaries
 
-## Available CLI Commands
+Canonical profiling supports bounded feature chunks and shared-memory joblib
+workers. Sparse matrices remain sparse between feature extractions, while the
+statistics for each active feature use a dense cell-length vector. Backed
+AnnData `X`, raw data, and layers are tested, but this is not a general
+out-of-core guarantee. Small profiles may be faster with the serial default;
+benchmark representative data before increasing `n_jobs`.
 
--   **`scfeatureprofiler find-markers`**: A full pipeline to select, profile, and rank robust marker features.
--   **`scfeatureprofiler profile`**: Generate a detailed statistical profile for a user-provided list of features.
--   **`scfeatureprofiler activity`**: Summarize a profile to show in which groups features are "ON".
+## Documentation
 
-Use `scfeatureprofiler --help` or `scfeatureprofiler find-markers --help` for a full list of options.
+- [Documentation index](docs/README.md)
+- [Seven reproducible validation scenarios](docs/tutorials/seven-validation-scenarios.md)
+- [Canonical output schema](docs/reference/canonical-profile-schema.md)
+- [Biological-replicate evidence](docs/reference/replicate-profile-schema.md)
+- [Resampling and uncertainty](docs/reference/resampling.md)
+- [Annotation evidence and visualization](docs/reference/annotation-evidence.md)
+- [Clustering geometry diagnostics](docs/reference/clustering-diagnostics.md)
+- [CLI reference](docs/reference/cli.md)
+- [Measured performance behavior](docs/reference/performance.md)
+
+## Scope
+
+The package does not download CELLxGENE data, infer annotations or ontologies,
+integrate modalities, model trajectories, or impose a formal cell-type/state
+solution. Independent datasets can be compared through completed profile tables
+without integrating their expression matrices.

@@ -5,13 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scfeatureprofiler"
 
-version = "1.1.2"
+version = "2.0.0"
 
-description = "A powerful, multi-interface Python package for deep characterization of single-cell feature expression patterns."
+description = "Interpretable molecular evidence profiles for supplied single-cell identities."
 readme = "README.md"
-license = "MIT"
+license = {file = "LICENSE"}
 authors = [
     {name = "Qingzhou Zhang"}
+]
+keywords = [
+    "single-cell",
+    "biomarkers",
+    "annotation-evidence",
+    "bioinformatics",
 ]
 classifiers = [
     
@@ -22,6 +28,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 requires-python = ">=3.9"
@@ -33,8 +40,10 @@ dependencies = [
     "scipy>=1.7.0",
     "statsmodels>=0.13.0",
     "joblib>=1.2.0",
+    "matplotlib>=3.5.0",
     "typer>=0.9.0",
-    "scanpy>=1.9.0", 
+    "anndata>=0.8.0",
+    "scikit-learn>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +56,8 @@ dev = [
     "mypy>=1.0.0",
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "build>=1.0.0",
+    "twine>=5.0.0",
 ]
 docs = [
     "sphinx>=5.0.0",
@@ -64,6 +75,11 @@ all = [
 [project.scripts]
 scfeatureprofiler = "scfeatureprofiler.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/zqzneptune/SingleCellFeatureProfiler"
+Repository = "https://github.com/zqzneptune/SingleCellFeatureProfiler"
+Issues = "https://github.com/zqzneptune/SingleCellFeatureProfiler/issues"
+
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -76,6 +92,8 @@ target-version = ['py39']
 [tool.ruff]
 line-length = 88
 target-version = "py39"
+
+[tool.ruff.lint]
 select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
@@ -87,7 +105,7 @@ select = [
 ]
 ignore = []
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 
 [tool.mypy]
